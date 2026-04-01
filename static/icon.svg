@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#1a1a2e"/>
+      <stop offset="100%" stop-color="#0a0a0a"/>
+    </radialGradient>
+    <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#00d4ff" stop-opacity="0.3"/>
+      <stop offset="100%" stop-color="#00d4ff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="512" height="512" rx="96" fill="url(#bg)"/>
+
+  <!-- Subtle radio wave rings -->
+  <circle cx="256" cy="240" r="180" fill="none" stroke="#00d4ff" stroke-opacity="0.08" stroke-width="1.5"/>
+  <circle cx="256" cy="240" r="140" fill="none" stroke="#00d4ff" stroke-opacity="0.12" stroke-width="1.5"/>
+  <circle cx="256" cy="240" r="100" fill="none" stroke="#00d4ff" stroke-opacity="0.06" stroke-width="1.5"/>
+
+  <!-- Mesh network edges -->
+  <g stroke="#00d4ff" stroke-opacity="0.35" stroke-width="2">
+    <!-- Center to outer nodes -->
+    <line x1="256" y1="200" x2="160" y2="120"/>
+    <line x1="256" y1="200" x2="352" y2="120"/>
+    <line x1="256" y1="200" x2="140" y2="280"/>
+    <line x1="256" y1="200" x2="372" y2="280"/>
+    <line x1="256" y1="200" x2="180" y2="340"/>
+    <line x1="256" y1="200" x2="332" y2="340"/>
+    <!-- Outer ring connections -->
+    <line x1="160" y1="120" x2="352" y2="120"/>
+    <line x1="140" y1="280" x2="180" y2="340"/>
+    <line x1="372" y1="280" x2="332" y2="340"/>
+    <line x1="160" y1="120" x2="140" y2="280"/>
+    <line x1="352" y1="120" x2="372" y2="280"/>
+    <line x1="180" y1="340" x2="332" y2="340"/>
+  </g>
+
+  <!-- Center glow -->
+  <circle cx="256" cy="200" r="40" fill="url(#glow)"/>
+
+  <!-- Mesh nodes (outer) -->
+  <g fill="#00d4ff" fill-opacity="0.7">
+    <circle cx="160" cy="120" r="8"/>
+    <circle cx="352" cy="120" r="8"/>
+    <circle cx="140" cy="280" r="8"/>
+    <circle cx="372" cy="280" r="8"/>
+    <circle cx="180" cy="340" r="8"/>
+    <circle cx="332" cy="340" r="8"/>
+  </g>
+
+  <!-- Center node (larger, brighter) -->
+  <circle cx="256" cy="200" r="14" fill="#00d4ff"/>
+  <circle cx="256" cy="200" r="8" fill="#ffffff" fill-opacity="0.9"/>
+
+  <!-- "MESH" text -->
+  <text x="256" y="430" text-anchor="middle" font-family="monospace, 'Courier New'" font-size="52" font-weight="bold" fill="#00d4ff" letter-spacing="8">MESH</text>
+</svg>

@@ -1,0 +1,770 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="MeshChat" />
+  <meta name="theme-color" content="#0a0a0a" />
+  <title>MeshChat</title>
+  <link rel="manifest" href="/manifest.json" />
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Inter:wght@400;500;600&display=swap');
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg-base:       #0a0a0a;
+      --bg-surface:    #111111;
+      --bg-elevated:   #1a1a1a;
+      --bg-input:      #161616;
+      --border:        rgba(255,255,255,0.08);
+      --border-hover:  rgba(255,255,255,0.14);
+      --text-primary:  #f0f0f0;
+      --text-secondary:#888;
+      --text-muted:    #555;
+      --accent:        #22c55e;
+      --accent-dim:    rgba(34,197,94,0.12);
+      --amber:         #f59e0b;
+      --amber-dim:     rgba(245,158,11,0.12);
+      --red:           #ef4444;
+      --red-dim:       rgba(239,68,68,0.12);
+      --blue:          #60a5fa;
+      --blue-dim:      rgba(96,165,250,0.1);
+      --radius-sm:     6px;
+      --radius-md:     10px;
+      --radius-lg:     14px;
+      --font-ui:       'Inter', sans-serif;
+      --font-mono:     'JetBrains Mono', monospace;
+      --safe-bottom:   env(safe-area-inset-bottom, 0px);
+    }
+
+    html, body { height: 100%; overflow: hidden; background: var(--bg-base); color: var(--text-primary); font-family: var(--font-ui); }
+    #app { display: flex; flex-direction: column; height: 100dvh; max-width: 480px; margin: 0 auto; }
+
+    /* topbar */
+    #topbar {
+      flex-shrink: 0; display: flex; align-items: center; gap: 12px;
+      padding: 14px 16px;
+      padding-top: calc(14px + env(safe-area-inset-top, 0px));
+      background: var(--bg-surface); border-bottom: 1px solid var(--border); z-index: 10;
+    }
+    .logo-mark {
+      width: 32px; height: 32px; flex-shrink: 0;
+      background: var(--accent-dim); border: 1px solid rgba(34,197,94,0.3);
+      border-radius: var(--radius-sm); display: flex; align-items: center; justify-content: center;
+    }
+    .logo-mark svg { width: 16px; height: 16px; }
+    #topbar-center { flex: 1; min-width: 0; }
+    #topbar-title { font-size: 14px; font-weight: 600; letter-spacing: 0.02em; }
+    #node-addr { font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
+    #status-pill {
+      display: flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 500;
+      padding: 4px 9px; border-radius: 99px; flex-shrink: 0;
+      border: 1px solid rgba(245,158,11,0.25); background: var(--amber-dim); color: var(--amber);
+      transition: background .3s, border-color .3s, color .3s;
+    }
+    #status-pill.live { border-color: rgba(34,197,94,0.25); background: var(--accent-dim); color: var(--accent); }
+    #status-pill.error { border-color: rgba(239,68,68,0.25); background: var(--red-dim); color: var(--red); }
+    #status-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: pulse-dot 2.4s infinite; }
+    @keyframes pulse-dot { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+    /* nav */
+    #nav {
+      flex-shrink: 0; display: flex; align-items: center; gap: 2px;
+      padding: 0 16px; background: var(--bg-surface); border-bottom: 1px solid var(--border);
+    }
+    .nav-tab {
+      padding: 10px 14px; font-size: 13px; font-weight: 500; color: var(--text-muted);
+      border: none; background: none; cursor: pointer; border-bottom: 2px solid transparent;
+      transition: color .15s, border-color .15s; white-space: nowrap;
+    }
+    .nav-tab.active { color: var(--text-primary); border-bottom-color: var(--accent); }
+    .nav-tab:hover:not(.active) { color: var(--text-secondary); }
+
+    /* content */
+    #content { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+    .view { display: none; flex-direction: column; height: 100%; }
+    .view.active { display: flex; }
+
+    /* message list */
+    #msg-list {
+      flex: 1; overflow-y: auto; padding: 16px;
+      display: flex; flex-direction: column; gap: 4px; scroll-behavior: smooth;
+    }
+    #msg-list::-webkit-scrollbar { width: 0; }
+    .date-sep {
+      display: flex; align-items: center; gap: 10px;
+      margin: 8px 0; font-size: 11px; color: var(--text-muted); font-family: var(--font-mono);
+    }
+    .date-sep::before, .date-sep::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+    .msg {
+      display: flex; flex-direction: column; max-width: 82%; padding: 8px 12px;
+      border-radius: var(--radius-md); border: 1px solid var(--border); background: var(--bg-elevated);
+      animation: msg-in .18s ease-out;
+    }
+    @keyframes msg-in { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:none} }
+    .msg.outbound { align-self: flex-end; background: var(--accent-dim); border-color: rgba(34,197,94,0.18); }
+    .msg.inbound  { align-self: flex-start; }
+    .msg.system   { align-self: center; max-width: 90%; background: var(--amber-dim); border-color: rgba(245,158,11,0.2); font-size: 11px; color: var(--amber); font-family: var(--font-mono); }
+    .msg-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 4px; }
+    .msg-from { font-size: 11px; font-weight: 600; font-family: var(--font-mono); color: var(--accent); letter-spacing: .02em; }
+    .msg.inbound .msg-from { color: var(--blue); }
+    .msg-time { font-size: 10px; color: var(--text-muted); font-family: var(--font-mono); flex-shrink: 0; }
+    .msg-body { font-size: 14px; line-height: 1.55; word-break: break-word; }
+    .msg-status { margin-top: 4px; font-size: 10px; font-family: var(--font-mono); display: flex; justify-content: flex-end; align-items: center; gap: 4px; }
+    .st-sending, .st-queued { color: var(--amber); }
+    .st-sent    { color: var(--text-muted); }
+    .st-delivered { color: var(--accent); }
+    .st-failed  { color: var(--red); }
+    .empty-state { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; opacity: .35; }
+    .empty-state svg { width: 40px; height: 40px; color: var(--text-muted); }
+    .empty-state p { font-size: 12px; color: var(--text-muted); font-family: var(--font-mono); }
+    .skeleton { height: 52px; border-radius: var(--radius-md); background: var(--bg-elevated); border: 1px solid var(--border); animation: shimmer 1.4s infinite; }
+    .skeleton.s { max-width: 55%; }
+    .skeleton.r { max-width: 78%; align-self: flex-end; }
+    @keyframes shimmer { 0%,100%{opacity:.4} 50%{opacity:.9} }
+
+    /* compose */
+    #compose {
+      flex-shrink: 0; padding: 12px 16px;
+      padding-bottom: calc(12px + var(--safe-bottom));
+      background: var(--bg-surface); border-top: 1px solid var(--border);
+    }
+    #dest-row {
+      display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
+      background: var(--bg-input); border: 1px solid var(--border);
+      border-radius: var(--radius-sm); padding: 6px 10px; transition: border-color .15s;
+    }
+    #dest-row:focus-within { border-color: var(--border-hover); }
+    #dest-label { font-size: 11px; font-weight: 600; color: var(--text-muted); font-family: var(--font-mono); white-space: nowrap; }
+    #dest-input { flex: 1; background: none; border: none; outline: none; font-family: var(--font-mono); font-size: 16px; color: var(--text-primary); }
+    #dest-input::placeholder { color: var(--text-muted); }
+    .dest-badge { font-size: 10px; padding: 2px 7px; border-radius: 99px; font-family: var(--font-mono); font-weight: 500; cursor: pointer; background: var(--blue-dim); color: var(--blue); border: 1px solid rgba(96,165,250,0.2); flex-shrink: 0; }
+    #msg-row { display: flex; gap: 8px; align-items: flex-end; }
+    #msg-input {
+      flex: 1; background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--radius-sm);
+      outline: none; resize: none; font-family: var(--font-ui); font-size: 16px; color: var(--text-primary);
+      padding: 8px 12px; line-height: 1.5; min-height: 40px; max-height: 120px; box-sizing: border-box;
+      transition: border-color .15s; overflow-y: auto;
+    }
+    #msg-input::placeholder { color: var(--text-muted); }
+    #msg-input:focus { border-color: var(--border-hover); }
+    #send-btn {
+      width: 40px; height: 40px; flex-shrink: 0; background: var(--accent); border: none;
+      border-radius: var(--radius-sm); cursor: pointer; display: flex; align-items: center; justify-content: center;
+      box-sizing: border-box; align-self: flex-end;
+      transition: background .15s, transform .1s, opacity .15s;
+    }
+    #send-btn:disabled { opacity: .4; cursor: not-allowed; }
+    #send-btn:not(:disabled):active { transform: scale(.95); background: #16a34a; }
+    #send-btn svg { width: 16px; height: 16px; }
+
+    /* contacts */
+    #contacts-view { overflow-y: auto; }
+    .section-header { padding: 14px 16px 8px; font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--text-muted); font-family: var(--font-mono); }
+    .contact-item { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--border); cursor: pointer; transition: background .12s; }
+    .contact-item:hover { background: var(--bg-elevated); }
+    .contact-avatar { width: 36px; height: 36px; border-radius: var(--radius-sm); display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; font-family: var(--font-mono); flex-shrink: 0; }
+    .av-green { background: var(--accent-dim); color: var(--accent); border: 1px solid rgba(34,197,94,0.25); }
+    .av-blue  { background: var(--blue-dim);   color: var(--blue);   border: 1px solid rgba(96,165,250,0.2); }
+    .av-amber { background: var(--amber-dim);  color: var(--amber);  border: 1px solid rgba(245,158,11,0.2); }
+    .av-muted { background: var(--bg-elevated);color: var(--text-muted); border: 1px solid var(--border); }
+    .contact-info { flex: 1; min-width: 0; }
+    .contact-name { font-size: 13px; font-weight: 500; }
+    .contact-addr { font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .contact-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+    .seen-time { font-size: 10px; color: var(--text-muted); font-family: var(--font-mono); }
+    .rssi-badge { font-size: 10px; padding: 2px 6px; border-radius: 99px; font-family: var(--font-mono); font-weight: 500; }
+    .rssi-good { background: var(--accent-dim); color: var(--accent); }
+    .rssi-ok   { background: var(--amber-dim);  color: var(--amber); }
+    .rssi-weak { background: var(--red-dim);     color: var(--red); }
+
+    /* settings */
+    #settings-view { overflow-y: auto; }
+    .settings-group { border-bottom: 1px solid var(--border); }
+    .settings-row { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; gap: 16px; }
+    .settings-label { font-size: 13px; font-weight: 500; }
+    .settings-desc { font-size: 11px; color: var(--text-muted); margin-top: 2px; font-family: var(--font-mono); }
+    .settings-value { font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary); flex-shrink: 0; text-align: right; }
+    .toggle { width: 40px; height: 22px; border-radius: 99px; background: var(--bg-elevated); border: 1px solid var(--border); position: relative; cursor: pointer; flex-shrink: 0; transition: background .2s, border-color .2s; }
+    .toggle.on { background: var(--accent); border-color: var(--accent); }
+    .toggle::after { content: ''; position: absolute; width: 16px; height: 16px; border-radius: 50%; background: var(--text-secondary); top: 2px; left: 2px; transition: transform .2s, background .2s; }
+    .toggle.on::after { transform: translateX(18px); background: #fff; }
+    .copy-btn { font-family: var(--font-mono); font-size: 10px; background: var(--bg-elevated); border: 1px solid var(--border); color: var(--text-secondary); padding: 4px 8px; border-radius: var(--radius-sm); cursor: pointer; transition: border-color .15s, color .15s; }
+    .copy-btn:hover { border-color: var(--border-hover); color: var(--text-primary); }
+    .copy-btn.copied { color: var(--accent); border-color: rgba(34,197,94,0.3); }
+
+    /* toast */
+    #toast {
+      position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%) translateY(12px);
+      background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-md);
+      padding: 10px 16px; font-size: 13px; color: var(--text-primary);
+      opacity: 0; transition: opacity .2s, transform .2s; pointer-events: none; white-space: nowrap; z-index: 100;
+    }
+    #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+    * { scrollbar-width: thin; scrollbar-color: var(--bg-elevated) transparent; }
+
+    /* offline overlay */
+    #offline-overlay {
+      position: fixed; inset: 0; z-index: 200;
+      background: var(--bg-base);
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      padding: 32px; text-align: center; gap: 24px;
+      transition: opacity .3s;
+    }
+    #offline-overlay.hidden { opacity: 0; pointer-events: none; }
+    #offline-overlay svg { width: 72px; height: 72px; color: var(--text-muted); opacity: .6; }
+    #offline-overlay h2 { font-family: var(--font-ui); font-size: 20px; font-weight: 600; color: var(--text-primary); }
+    #offline-overlay p { font-family: var(--font-ui); font-size: 15px; color: var(--text-secondary); line-height: 1.6; max-width: 320px; }
+    #offline-overlay .steps { text-align: left; max-width: 300px; }
+    #offline-overlay .steps li {
+      font-family: var(--font-ui); font-size: 14px; color: var(--text-secondary);
+      line-height: 1.6; margin-bottom: 8px; list-style: none; padding-left: 24px; position: relative;
+    }
+    #offline-overlay .steps li::before {
+      content: attr(data-n); position: absolute; left: 0; color: var(--accent); font-weight: 600;
+      font-family: var(--font-mono); font-size: 13px;
+    }
+    #offline-overlay .retry-btn {
+      font-family: var(--font-ui); font-size: 14px; font-weight: 500;
+      background: var(--bg-elevated); color: var(--text-primary);
+      border: 1px solid var(--border); border-radius: var(--radius-sm);
+      padding: 10px 24px; cursor: pointer; transition: border-color .15s;
+    }
+    #offline-overlay .retry-btn:hover { border-color: var(--border-hover); }
+    #offline-overlay .retry-btn:active { background: var(--bg-input); }
+  </style>
+</head>
+<body>
+
+<div id="offline-overlay" class="hidden">
+  <svg viewBox="0 0 72 72" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <circle cx="36" cy="28" r="4" fill="currentColor"/>
+    <circle cx="18" cy="44" r="3" fill="currentColor" opacity="0.5"/>
+    <circle cx="54" cy="44" r="3" fill="currentColor" opacity="0.5"/>
+    <circle cx="12" cy="28" r="2.5" fill="currentColor" opacity="0.3"/>
+    <circle cx="60" cy="28" r="2.5" fill="currentColor" opacity="0.3"/>
+    <line x1="36" y1="28" x2="18" y2="44" stroke="currentColor" stroke-width="1.5" opacity="0.3" stroke-dasharray="3 3"/>
+    <line x1="36" y1="28" x2="54" y2="44" stroke="currentColor" stroke-width="1.5" opacity="0.3" stroke-dasharray="3 3"/>
+    <line x1="36" y1="28" x2="12" y2="28" stroke="currentColor" stroke-width="1.5" opacity="0.3" stroke-dasharray="3 3"/>
+    <line x1="36" y1="28" x2="60" y2="28" stroke="currentColor" stroke-width="1.5" opacity="0.3" stroke-dasharray="3 3"/>
+    <line x1="28" y1="58" x2="44" y2="58" stroke="currentColor" stroke-width="2" stroke-linecap="round" opacity="0.5"/>
+    <line x1="32" y1="62" x2="40" y2="62" stroke="currentColor" stroke-width="2" stroke-linecap="round" opacity="0.3"/>
+  </svg>
+  <h2>Not connected to your node</h2>
+  <p>MeshChat needs to be on the same Wi-Fi network as your node to work.</p>
+  <ol class="steps">
+    <li data-n="1.">Open your device's Wi-Fi settings</li>
+    <li data-n="2.">Connect to your node's network</li>
+    <li data-n="3.">Come back here once you're connected</li>
+  </ol>
+  <button class="retry-btn" onclick="retryConnection()">Try again</button>
+</div>
+
+<div id="app">
+
+  <div id="topbar">
+    <div class="logo-mark">
+      <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="8" cy="8" r="2.5" fill="#22c55e"/>
+        <path d="M8 1v2M8 13v2M1 8h2M13 8h2" stroke="#22c55e" stroke-width="1.5" stroke-linecap="round"/>
+        <path d="M3.5 3.5l1.4 1.4M11.1 11.1l1.4 1.4M11.1 4.9l-1.4 1.4M4.9 10.6l-1.4 1.4" stroke="#22c55e" stroke-width="1" stroke-linecap="round" opacity="0.5"/>
+      </svg>
+    </div>
+    <div id="topbar-center">
+      <div id="topbar-title">MeshChat</div>
+      <div id="node-addr">connecting…</div>
+    </div>
+    <div id="status-pill">
+      <div id="status-dot"></div>
+      <span id="status-text">offline</span>
+    </div>
+  </div>
+
+  <div id="nav">
+    <button class="nav-tab active" data-tab="messages" onclick="switchTab('messages',this)">Messages</button>
+    <button class="nav-tab" data-tab="contacts"        onclick="switchTab('contacts',this)">Nodes</button>
+    <button class="nav-tab" data-tab="settings"        onclick="switchTab('settings',this)">Settings</button>
+  </div>
+
+  <div id="content">
+
+    <!-- Messages -->
+    <div id="messages-view" class="view active">
+      <div id="msg-list"><div id="msg-anchor"></div></div>
+      <div id="compose">
+        <div id="dest-row">
+          <span id="dest-label">TO</span>
+          <input id="dest-input" type="text" placeholder="destination hash" autocomplete="off" spellcheck="false" />
+          <span class="dest-badge" onclick="switchTab('contacts', document.querySelector('[data-tab=contacts]'))">nodes ↗</span>
+        </div>
+        <div id="msg-row">
+          <textarea id="msg-input" placeholder="message…" rows="1" oninput="autoResize(this)" onkeydown="handleKey(event)"></textarea>
+          <button id="send-btn" onclick="sendMessage()" title="Send" disabled>
+            <svg viewBox="0 0 16 16" fill="none"><path d="M14 8L2 2l3 6-3 6 12-6z" fill="#0a0a0a"/></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Nodes -->
+    <div id="contacts-view" class="view">
+      <div class="section-header">known nodes</div>
+      <div id="contacts-list"><div style="padding:40px 16px;text-align:center;font-size:12px;color:var(--text-muted);font-family:var(--font-mono)">no nodes announced yet</div></div>
+      <div class="section-header" style="margin-top:8px">broadcast</div>
+      <div class="contact-item" onclick="selectDest('broadcast')">
+        <div class="contact-avatar av-muted">*</div>
+        <div class="contact-info">
+          <div class="contact-name">All Nodes</div>
+          <div class="contact-addr">lxmf broadcast channel</div>
+        </div>
+        <div class="contact-meta"><span class="seen-time">always active</span></div>
+      </div>
+    </div>
+
+    <!-- Settings -->
+    <div id="settings-view" class="view">
+      <div class="section-header">identity</div>
+      <div class="settings-group">
+        <div class="settings-row">
+          <div>
+            <div class="settings-label">Node address</div>
+            <div class="settings-desc" id="full-addr">—</div>
+          </div>
+          <button class="copy-btn" id="copy-btn" onclick="copyAddr()">copy</button>
+        </div>
+        <div class="settings-row">
+          <div><div class="settings-label">Display name</div><div class="settings-desc">shown to other nodes</div></div>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <div class="settings-value" id="display-name-val" contenteditable="true" spellcheck="false"
+                 style="min-width:60px;padding:2px 6px;border:1px solid transparent;border-radius:var(--radius-sm);outline:none;transition:border-color .15s;cursor:text;"
+                 onfocus="this.style.borderColor='var(--border-hover)'"
+                 onblur="this.style.borderColor='transparent'; saveDisplayName(this.textContent)"
+                 onkeydown="if(event.key==='Enter'){event.preventDefault();this.blur()}">—</div>
+          </div>
+        </div>
+      </div>
+      <div class="section-header">connection</div>
+      <div class="settings-group">
+        <div class="settings-row">
+          <div><div class="settings-label">WebSocket</div><div class="settings-desc" id="ws-url-desc">—</div></div>
+          <div class="settings-value" id="ws-status-val" style="color:var(--amber)">offline</div>
+        </div>
+        <div class="settings-row">
+          <div><div class="settings-label">LoRa interface</div><div class="settings-desc">heltec v4 · usb0</div></div>
+          <div class="settings-value" id="iface-status">—</div>
+        </div>
+      </div>
+      <div class="section-header">notifications</div>
+      <div class="settings-group">
+        <div class="settings-row">
+          <div><div class="settings-label">Vibrate on inbound</div><div class="settings-desc">haptic on new message</div></div>
+          <div class="toggle on" id="toggle-vibrate" onclick="this.classList.toggle('on')"></div>
+        </div>
+        <div class="settings-row">
+          <div><div class="settings-label">Sound</div><div class="settings-desc">audio on new message</div></div>
+          <div class="toggle" id="toggle-sound" onclick="this.classList.toggle('on')"></div>
+        </div>
+      </div>
+      <div class="section-header">reticulum</div>
+      <div class="settings-group">
+        <div class="settings-row">
+          <div><div class="settings-label">Transport node</div><div class="settings-desc">forward packets for others</div></div>
+          <div class="toggle on" onclick="this.classList.toggle('on')"></div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+<div id="toast"></div>
+
+<script>
+// ── Config ──────────────────────────────────────────────────────────────────
+const API  = window.location.origin;
+const WS   = `ws://${window.location.host}/ws`;
+
+// ── State ───────────────────────────────────────────────────────────────────
+let myHash      = null;
+let ws          = null;
+let wsLive      = false;
+let rendered    = new Set();    // db IDs already painted
+let pending     = new Map();    // tempId → DOM el (optimistic)
+let nodes       = new Map();    // hash → {name, last_seen, rssi}
+let pollTimer   = null;
+let toastTimer  = null;
+let lastDate    = null;         // tracks date separator rendering
+
+// ── Boot ────────────────────────────────────────────────────────────────────
+window.addEventListener('load', async () => {
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+  document.getElementById('ws-url-desc').textContent = WS;
+  showSkeletons();
+  await loadIdentity();
+  await loadMessages();
+  connectWS();
+});
+
+// ── Identity ─────────────────────────────────────────────────────────────────
+async function loadIdentity() {
+  try {
+    const d = await fetch(`${API}/api/identity`).then(r => r.json());
+    myHash = d.hash;
+    document.getElementById('node-addr').textContent      = shortHash(myHash);
+    document.getElementById('full-addr').textContent      = myHash;
+    document.getElementById('display-name-val').textContent = d.display_name || '—';
+    document.getElementById('iface-status').textContent   = 'active';
+    document.getElementById('iface-status').style.color   = 'var(--accent)';
+    document.getElementById('send-btn').disabled = false;
+    document.getElementById('offline-overlay').classList.add('hidden');
+  } catch {
+    document.getElementById('offline-overlay').classList.remove('hidden');
+  }
+}
+
+async function retryConnection() {
+  const btn = document.querySelector('.retry-btn');
+  btn.textContent = 'Connecting...';
+  btn.disabled = true;
+  await loadIdentity();
+  const overlay = document.getElementById('offline-overlay');
+  if (overlay.classList.contains('hidden')) {
+    await loadMessages();
+    connectWS();
+  } else {
+    btn.textContent = 'Try again';
+    btn.disabled = false;
+  }
+}
+
+// ── Message history ──────────────────────────────────────────────────────────
+async function loadMessages() {
+  clearSkeletons();
+  try {
+    const msgs = await fetch(`${API}/api/messages`).then(r => r.json());
+    if (!Array.isArray(msgs) || msgs.length === 0) { showEmptyState(); return; }
+    removeEmptyState();
+    lastDate = null;
+    for (const m of msgs) { maybeInsertDateSep(m.ts); paintMsg(m); rendered.add(m.id); }
+    scrollBottom();
+  } catch {
+    paintSystemMsg('could not reach backend · is the server running?');
+  }
+}
+
+// ── Poll fallback ─────────────────────────────────────────────────────────────
+function startPoll() {
+  stopPoll();
+  pollTimer = setInterval(async () => {
+    if (wsLive) return;
+    try {
+      const msgs = await fetch(`${API}/api/messages`).then(r => r.json());
+      if (!Array.isArray(msgs)) return;
+      let added = false;
+      for (const m of msgs) {
+        if (rendered.has(m.id)) continue;
+        removeEmptyState();
+        maybeInsertDateSep(m.ts);
+        paintMsg(m);
+        rendered.add(m.id);
+        added = true;
+        if (m.direction === 'in') { toast(`↓ ${shortHash(m.from_hash)}`); doVibrate(); }
+      }
+      if (added) scrollBottom();
+    } catch {}
+  }, 10000);
+}
+function stopPoll() { clearInterval(pollTimer); }
+
+// ── WebSocket ────────────────────────────────────────────────────────────────
+function connectWS() {
+  if (ws) { ws.onclose = null; ws.close(); }
+  ws = new WebSocket(WS);
+
+  ws.onopen = () => {
+    wsLive = true;
+    setStatus('live', 'live');
+    stopPoll();
+  };
+
+  ws.onmessage = ({ data }) => {
+    try {
+      const msg = JSON.parse(data);
+      if (msg.type === 'message' && !rendered.has(msg.id)) {
+        removeEmptyState();
+        maybeInsertDateSep(Date.now() / 1000);
+        paintMsg({ id: msg.id, direction: 'in', from_hash: msg.from, body: msg.body, time: msg.time, status: 'delivered', ts: Date.now() / 1000 });
+        rendered.add(msg.id);
+        scrollBottom();
+        toast(`↓ ${shortHash(msg.from)}`);
+        doVibrate();
+        updateNode(msg.from, { last_seen: 'just now' });
+      } else if (msg.type === 'status_update') {
+        resolveById(msg.msg_id, msg.status);
+      }
+    } catch {}
+  };
+
+  ws.onclose = () => {
+    wsLive = false;
+    setStatus('', 'offline');
+    startPoll();
+    setTimeout(connectWS, 5000);
+  };
+
+  ws.onerror = () => setStatus('error', 'error');
+}
+
+window.addEventListener('online', () => retryConnection());
+window.addEventListener('offline', () => {
+  document.getElementById('offline-overlay').classList.remove('hidden');
+});
+
+// ── Send ─────────────────────────────────────────────────────────────────────
+async function sendMessage() {
+  const dest = document.getElementById('dest-input').value.trim();
+  const body = document.getElementById('msg-input').value.trim();
+  if (!body) return;
+  if (!dest) { toast('enter a destination'); return; }
+
+  const tmpId = 'tmp-' + Date.now();
+  const now   = new Date();
+  const tStr  = pad(now.getHours()) + ':' + pad(now.getMinutes());
+
+  removeEmptyState();
+  maybeInsertDateSep(now.getTime() / 1000);
+  const el = paintMsg({ _tmpId: tmpId, direction: 'out', to_hash: dest, body, time: tStr, status: 'sending', ts: now.getTime() / 1000 });
+  pending.set(tmpId, el);
+
+  document.getElementById('msg-input').value = '';
+  document.getElementById('msg-input').style.height = 'auto';
+  scrollBottom();
+
+  try {
+    const res  = await fetch(`${API}/api/messages`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ to: dest, body }),
+    });
+    const d = await res.json();
+    if (res.status === 202) {
+      resolveOptimistic(tmpId, d.id, 'queued');
+      toast('path unknown · queued for retry');
+    } else if (res.ok) {
+      resolveOptimistic(tmpId, d.id, d.status || 'sent');
+    } else {
+      resolveOptimistic(tmpId, null, 'failed');
+      toast(d.error || 'send failed');
+    }
+  } catch {
+    resolveOptimistic(tmpId, null, 'failed');
+    toast('network error · not sent');
+  }
+}
+
+function resolveOptimistic(tmpId, realId, status) {
+  const el = pending.get(tmpId);
+  if (!el) return;
+  pending.delete(tmpId);
+  if (realId != null) { el.dataset.msgid = realId; rendered.add(realId); }
+  setStatusEl(el, status);
+}
+
+function resolveById(msgId, status) {
+  const el = document.querySelector(`[data-msgid="${msgId}"]`);
+  if (el) setStatusEl(el, status);
+}
+
+// ── DOM painters ─────────────────────────────────────────────────────────────
+function paintMsg(m) {
+  const list   = document.getElementById('msg-list');
+  const anchor = document.getElementById('msg-anchor');
+  const div    = document.createElement('div');
+  const out    = m.direction === 'out';
+  div.className = 'msg ' + (out ? 'outbound' : 'inbound');
+  if (m.id)     div.dataset.msgid = m.id;
+  if (m._tmpId) div.dataset.tmpid = m._tmpId;
+  const from = out ? 'you' : shortHash(m.from_hash);
+  const stat = out ? `<div class="msg-status">${statusHTML(m.status)}</div>` : '';
+  div.innerHTML = `
+    <div class="msg-header">
+      <span class="msg-from">${esc(from)}</span>
+      <span class="msg-time">${esc(m.time || '')}</span>
+    </div>
+    <div class="msg-body">${esc(m.body)}</div>${stat}`;
+  list.insertBefore(div, anchor);
+  return div;
+}
+
+function maybeInsertDateSep(ts) {
+  const label = dateSepLabel(ts);
+  if (label === lastDate) return;
+  lastDate = label;
+  const list   = document.getElementById('msg-list');
+  const anchor = document.getElementById('msg-anchor');
+  const sep    = document.createElement('div');
+  sep.className = 'date-sep';
+  sep.textContent = label;
+  list.insertBefore(sep, anchor);
+}
+
+function paintSystemMsg(text) {
+  const list   = document.getElementById('msg-list');
+  const anchor = document.getElementById('msg-anchor');
+  const div    = document.createElement('div');
+  div.className = 'msg system';
+  div.innerHTML = `<span>${esc(text)}</span>`;
+  list.insertBefore(div, anchor);
+}
+
+function showEmptyState() {
+  if (document.getElementById('_es')) return;
+  const list   = document.getElementById('msg-list');
+  const anchor = document.getElementById('msg-anchor');
+  const es     = document.createElement('div');
+  es.id = '_es'; es.className = 'empty-state';
+  es.innerHTML = `
+    <svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <circle cx="20" cy="20" r="3" fill="currentColor"/>
+      <path d="M20 4v4M20 32v4M4 20h4M32 20h4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+      <path d="M8.1 8.1l2.8 2.8M29.1 29.1l2.8 2.8M29.1 10.9l-2.8 2.8M10.9 29.1l-2.8 2.8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" opacity="0.5"/>
+    </svg>
+    <p>no messages yet</p>`;
+  list.insertBefore(es, anchor);
+}
+function removeEmptyState() { document.getElementById('_es')?.remove(); }
+
+function showSkeletons() {
+  const list = document.getElementById('msg-list'), anchor = document.getElementById('msg-anchor');
+  ['s','r','s','r'].forEach(cls => {
+    const s = document.createElement('div');
+    s.className = `skeleton ${cls}`; s.dataset.sk = '1';
+    list.insertBefore(s, anchor);
+  });
+}
+function clearSkeletons() { document.querySelectorAll('[data-sk]').forEach(e => e.remove()); }
+
+function setStatusEl(el, status) {
+  const s = el.querySelector('.msg-status');
+  if (s) s.innerHTML = statusHTML(status);
+}
+
+function statusHTML(s) {
+  const map = { sending:'◷ sending', queued:'◷ queued', sent:'✓ sent', delivered:'✓✓ delivered', failed:'✕ failed' };
+  const cls = { sending:'st-queued', queued:'st-queued', sent:'st-sent', delivered:'st-delivered', failed:'st-failed' };
+  const label = map[s] || s || '';
+  const c     = cls[s] || 'st-sent';
+  return `<span class="${c}">${esc(label)}</span>`;
+}
+
+// ── Contacts ─────────────────────────────────────────────────────────────────
+function updateNode(hash, meta) {
+  nodes.set(hash, { ...(nodes.get(hash) || {}), ...meta, hash });
+  renderNodes();
+}
+
+function renderNodes() {
+  const list = document.getElementById('contacts-list');
+  if (nodes.size === 0) { list.innerHTML = `<div style="padding:40px 16px;text-align:center;font-size:12px;color:var(--text-muted);font-family:var(--font-mono)">no nodes announced yet</div>`; return; }
+  list.innerHTML = '';
+  const avs = ['av-green','av-blue','av-amber'];
+  let i = 0;
+  for (const [hash, node] of nodes.entries()) {
+    const cls = avs[i++ % avs.length];
+    const rssi = node.rssi ? `<span class="rssi-badge ${rssiCls(node.rssi)}">${esc(node.rssi)}</span>` : '';
+    const d = document.createElement('div');
+    d.className = 'contact-item'; d.onclick = () => selectDest(hash);
+    d.innerHTML = `
+      <div class="contact-avatar ${cls}">${esc((node.name || shortHash(hash))[0].toUpperCase())}</div>
+      <div class="contact-info">
+        <div class="contact-name">${esc(node.name || shortHash(hash))}</div>
+        <div class="contact-addr">${esc(hash)}</div>
+      </div>
+      <div class="contact-meta">
+        <span class="seen-time">${esc(node.last_seen || '—')}</span>${rssi}
+      </div>`;
+    list.appendChild(d);
+  }
+}
+
+function rssiCls(r) { const v = parseInt(r); return v >= -95 ? 'rssi-good' : v >= -105 ? 'rssi-ok' : 'rssi-weak'; }
+
+function selectDest(hash) {
+  document.getElementById('dest-input').value = hash;
+  switchTab('messages', document.querySelector('[data-tab=messages]'));
+  document.getElementById('msg-input').focus();
+}
+
+// ── UI helpers ────────────────────────────────────────────────────────────────
+function switchTab(name, el) {
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+  document.getElementById(name + '-view').classList.add('active');
+  el.classList.add('active');
+}
+
+function setStatus(cls, text) {
+  const p = document.getElementById('status-pill');
+  p.className = cls;
+  document.getElementById('status-text').textContent  = text;
+  document.getElementById('ws-status-val').textContent = text;
+  document.getElementById('ws-status-val').style.color = cls === 'live' ? 'var(--accent)' : cls === 'error' ? 'var(--red)' : 'var(--amber)';
+}
+
+function autoResize(el) { el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 120) + 'px'; }
+function handleKey(e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } }
+function scrollBottom() { document.getElementById('msg-anchor').scrollIntoView({ behavior: 'smooth' }); }
+
+async function saveDisplayName(name) {
+  name = name.trim();
+  if (!name || name === '—') return;
+  try {
+    const res = await fetch(`${API}/api/display_name`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ display_name: name }),
+    });
+    if (res.ok) {
+      toast('display name saved');
+    } else {
+      const d = await res.json();
+      toast(d.error || 'could not save name');
+    }
+  } catch {
+    toast('network error');
+  }
+}
+
+function copyAddr() {
+  if (!myHash) return;
+  navigator.clipboard.writeText(myHash).then(() => {
+    const b = document.getElementById('copy-btn');
+    b.textContent = 'copied!'; b.classList.add('copied');
+    setTimeout(() => { b.textContent = 'copy'; b.classList.remove('copied'); }, 1800);
+  });
+}
+
+function toast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 2400);
+}
+
+function doVibrate() {
+  if (document.getElementById('toggle-vibrate').classList.contains('on') && navigator.vibrate)
+    navigator.vibrate([40, 20, 40]);
+}
+
+// ── Format helpers ───────────────────────────────────────────────────────────
+function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function pad(n) { return String(n).padStart(2,'0'); }
+function shortHash(h) { if (!h) return '?'; return h.length > 12 ? h.slice(0,4)+'…'+h.slice(-4) : h; }
+function dateSepLabel(ts) {
+  const d = new Date(ts * 1000), now = new Date();
+  if (d.toDateString() === now.toDateString()) return 'today · ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+  return d.toLocaleDateString('en-GB', { day:'numeric', month:'short' });
+}
+</script>
+</body>
+</html>
