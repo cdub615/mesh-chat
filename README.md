@@ -27,7 +27,7 @@ Phone/Laptop                 Raspberry Pi                  LoRa Mesh
 This was built for and tested on:
 
 - **Raspberry Pi 4B** running Pi OS Lite (headless)
-- **Heltec LoRa 32 V3** connected via USB (running [RNode firmware](https://github.com/markqvist/RNode_Firmware))
+- **Heltec LoRa 32 V4** connected via USB (running [RNode firmware](https://github.com/markqvist/RNode_Firmware))
 - **LoRa antenna** matched to your frequency band
 - Pi configured as a **WiFi Access Point** so clients can connect without existing infrastructure
 
