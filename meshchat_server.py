@@ -74,6 +74,14 @@ def init_db():
                 status    TEXT    DEFAULT 'sent'  -- 'sent' | 'queued' | 'delivered' | 'failed'
             )
         """)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS peers (
+                hash         TEXT PRIMARY KEY,
+                display_name TEXT,
+                first_seen   REAL NOT NULL,
+                last_seen    REAL NOT NULL
+            )
+        """)
         db.commit()
 
 
@@ -107,6 +115,48 @@ lxmf_router: Optional[LXMF.LXMRouter] = None
 local_destination: Optional[RNS.Destination] = (
     None  # returned by register_delivery_identity
 )
+
+
+def announce_received_callback(destination_hash, announced_identity, app_data):
+    """Called when an announce is received from another node."""
+    dest_hash_hex = RNS.prettyhexrep(destination_hash)
+    display_name = None
+    if app_data:
+        try:
+            display_name = app_data.decode("utf-8")
+        except Exception:
+            pass
+
+    ts = time.time()
+    with get_db() as db:
+        existing = db.execute("SELECT hash FROM peers WHERE hash = ?", (dest_hash_hex,)).fetchone()
+        if existing:
+            db.execute(
+                "UPDATE peers SET display_name = ?, last_seen = ? WHERE hash = ?",
+                (display_name, ts, dest_hash_hex),
+            )
+        else:
+            db.execute(
+                "INSERT INTO peers (hash, display_name, first_seen, last_seen) VALUES (?, ?, ?, ?)",
+                (dest_hash_hex, display_name, ts, ts),
+            )
+        db.commit()
+
+    RNS.log(f"[MeshChat] Announce from {dest_hash_hex} ({display_name or 'unnamed'})")
+
+    payload = {
+        "type": "peer_discovered",
+        "hash": dest_hash_hex,
+        "display_name": display_name,
+        "last_seen": ts,
+    }
+    try:
+        loop = asyncio.get_event_loop()
+        loop.call_soon_threadsafe(
+            lambda: asyncio.ensure_future(manager.broadcast(payload))
+        )
+    except RuntimeError:
+        pass
 
 
 def lxmf_delivery_callback(message: LXMF.LXMessage):
@@ -155,6 +205,12 @@ def start_reticulum():
         display_name=get_display_name(),
     )
     lxmf_router.register_delivery_callback(lxmf_delivery_callback)
+
+    RNS.Transport.register_announce_handler(announce_received_callback)
+
+    # Auto-announce on boot so other nodes discover us
+    local_destination.announce(app_data=get_display_name().encode("utf-8"))
+
     RNS.log(
         f"[MeshChat] LXMF ready. Address: {RNS.prettyhexrep(local_destination.hash)}"
     )
@@ -197,6 +253,40 @@ async def api_set_display_name(payload: dict):
     if local_destination is not None:
         local_destination.display_name = name
     return {"display_name": name}
+
+
+@app.post("/api/announce")
+def api_announce():
+    if local_destination is None:
+        return JSONResponse({"error": "not ready"}, status_code=503)
+    local_destination.announce(app_data=get_display_name().encode("utf-8"))
+    return {"status": "announced"}
+
+
+@app.get("/api/peers")
+def api_peers():
+    with get_db() as db:
+        rows = db.execute(
+            "SELECT hash, display_name, first_seen, last_seen FROM peers ORDER BY last_seen DESC"
+        ).fetchall()
+    peers = []
+    for r in rows:
+        peer = dict(r)
+        try:
+            dest_hash = bytes.fromhex(r["hash"].replace(".", ""))
+            peer["has_path"] = RNS.Transport.has_path(dest_hash)
+        except Exception:
+            peer["has_path"] = False
+        peers.append(peer)
+    return peers
+
+
+@app.delete("/api/peers/{peer_hash}")
+def api_delete_peer(peer_hash: str):
+    with get_db() as db:
+        db.execute("DELETE FROM peers WHERE hash = ?", (peer_hash,))
+        db.commit()
+    return {"status": "removed"}
 
 
 @app.get("/api/messages")

@@ -110,7 +110,10 @@ sudo systemctl status meshchat   # should show active (running)
 | `GET` | `/api/messages?limit=N` | Message history |
 | `POST` | `/api/messages` | Send a message (`{"to": "<hash>", "body": "<text>"}`) |
 | `PUT` | `/api/display_name` | Update display name |
-| `WS` | `/ws` | Real-time message and status updates |
+| `POST` | `/api/announce` | Broadcast node presence over LoRa |
+| `GET` | `/api/peers` | List discovered peers with path status |
+| `DELETE` | `/api/peers/{hash}` | Remove a discovered peer |
+| `WS` | `/ws` | Real-time message, status, and peer updates |
 
 ## License
 

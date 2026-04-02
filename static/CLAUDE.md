@@ -53,7 +53,10 @@ No build step, no package manager, no test framework. The app is four files serv
 | GET | `/api/identity` | Node hash and display name |
 | GET | `/api/messages?limit=N` | Message history |
 | POST | `/api/messages` | Send message (returns 202 if path unknown) |
-| WS | `/ws` | Real-time message/status push |
+| POST | `/api/announce` | Broadcast presence over all interfaces |
+| GET | `/api/peers` | List discovered peers with path status |
+| DELETE | `/api/peers/{hash}` | Remove a peer |
+| WS | `/ws` | Real-time message/status/peer push |
 
 ## Design Constraints
 
