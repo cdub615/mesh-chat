@@ -62,6 +62,46 @@ The server binds to `0.0.0.0:8080`. Open `http://<pi-ip>:8080` from any device o
 - Set your display name in Settings
 - Enter a destination hash and start messaging
 
+## Running as a Service
+
+To have MeshChat start automatically on boot, set it up as a systemd service.
+
+### 1. Create the service file
+
+```bash
+sudo nano /etc/systemd/system/meshchat.service
+```
+
+Paste the following (adjust `User` and paths if your username isn't `cdub`):
+
+```ini
+[Unit]
+Description=MeshChat LoRa mesh web server
+After=network.target
+
+[Service]
+Type=simple
+User=cdub
+WorkingDirectory=/home/cdub/meshchat
+ExecStart=/home/cdub/meshchat/rns-venv/bin/python meshchat_server.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### 2. Enable and start it
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable meshchat
+sudo systemctl start meshchat
+sudo systemctl status meshchat   # should show active (running)
+```
+
 ## API
 
 | Method | Path | Description |
