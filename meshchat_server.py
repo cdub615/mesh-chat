@@ -114,24 +114,28 @@ def init_db():
 # ── WebSocket connection manager ────────────────────────────────────────────
 class ConnectionManager:
     def __init__(self):
-        self.active: list[WebSocket] = []
+        # set + discard is race-safe: disconnect() is idempotent even if the
+        # socket was already pruned by broadcast() or a concurrent cleanup.
+        self.active: set[WebSocket] = set()
 
     async def connect(self, ws: WebSocket):
         await ws.accept()
-        self.active.append(ws)
+        self.active.add(ws)
 
     def disconnect(self, ws: WebSocket):
-        self.active.remove(ws)
+        self.active.discard(ws)
 
     async def broadcast(self, data: dict):
         dead = []
-        for ws in self.active:
+        # Iterate a snapshot so concurrent connect/disconnect can't mutate
+        # the set mid-loop.
+        for ws in list(self.active):
             try:
                 await ws.send_text(json.dumps(data))
             except Exception:
                 dead.append(ws)
         for ws in dead:
-            self.active.remove(ws)
+            self.active.discard(ws)
 
 
 manager = ConnectionManager()
