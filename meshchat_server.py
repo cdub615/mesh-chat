@@ -151,12 +151,18 @@ def init_db():
         # ALTER, so enforce uniqueness with a partial index that ignores NULLs
         # (outbound rows don't have an lxmf_hash).
         _add_column_if_missing(db, "messages", "lxmf_hash", "TEXT")
+        _add_column_if_missing(db, "messages", "attempts", "INTEGER DEFAULT 0")
+        _add_column_if_missing(db, "messages", "next_retry_at", "REAL")
         db.execute("CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_messages_to_hash ON messages(to_hash)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_messages_from_hash ON messages(from_hash)")
         db.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_lxmf_hash "
             "ON messages(lxmf_hash) WHERE lxmf_hash IS NOT NULL"
+        )
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_queued "
+            "ON messages(status, next_retry_at) WHERE status = 'queued'"
         )
         db.commit()
 
@@ -230,6 +236,12 @@ last_announce_ts: float = 0.0
 rns_ready: bool = False
 rns_error: Optional[str] = None
 RNS_RETRY_INTERVAL = 30.0
+
+# Outbound retry schedule for messages whose destination path isn't yet
+# known. Index = attempt count that just failed; value = seconds until the
+# next retry. After QUEUED_RETRY_DELAYS is exhausted the row flips to failed.
+QUEUED_RETRY_DELAYS: list = [5.0, 15.0, 45.0, 120.0, 300.0, 600.0]
+QUEUED_RETRY_TICK = 5.0
 
 
 def send_announce(reason: str):
@@ -421,19 +433,38 @@ async def _rns_retry_loop():
             return
 
 
+def _resurrect_queued_messages() -> int:
+    """Reset next_retry_at=0 on any leftover queued rows so they get another
+    shot on the next retry tick after a restart. Returns the row count."""
+    with get_db() as db:
+        cursor = db.execute(
+            "UPDATE messages SET next_retry_at = 0 WHERE status = 'queued'"
+        )
+        db.commit()
+        return cursor.rowcount
+
+
 # ── App lifespan ────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global main_loop
     main_loop = asyncio.get_running_loop()
     init_db()
-    retry_task: Optional[asyncio.Task] = None
+    resurrected = _resurrect_queued_messages()
+    if resurrected:
+        RNS.log(
+            f"[MeshChat] Resurrected {resurrected} queued message(s) for retry"
+        )
+    rns_retry_task: Optional[asyncio.Task] = None
     if not start_reticulum():
-        # Startup failed but the HTTP server stays up; schedule recovery.
-        retry_task = asyncio.create_task(_rns_retry_loop())
-    yield
-    if retry_task is not None and not retry_task.done():
-        retry_task.cancel()
+        rns_retry_task = asyncio.create_task(_rns_retry_loop())
+    queued_retry_task = asyncio.create_task(_queued_retry_loop())
+    try:
+        yield
+    finally:
+        queued_retry_task.cancel()
+        if rns_retry_task is not None and not rns_retry_task.done():
+            rns_retry_task.cancel()
     # Reticulum / LXMF cleans up on process exit naturally
 
 
@@ -539,6 +570,138 @@ def api_get_messages(limit: int = 100):
     return messages
 
 
+def _make_delivery_status_callback(msg_id: int):
+    """Return a sync callback the LXMF library can invoke on state change."""
+    def cb(msg):
+        status = lxmf_status_name(msg.state)
+        with get_db() as db:
+            db.execute("UPDATE messages SET status=? WHERE id=?", (status, msg_id))
+            db.commit()
+        _broadcast_from_thread(
+            {"type": "status_update", "msg_id": msg_id, "status": status}
+        )
+    return cb
+
+
+def _try_submit_outbound(msg_id: int, to_hash: str, body: str) -> bool:
+    """Attempt to resolve the destination path and hand the message to LXMF.
+
+    Returns True if LXMRouter accepted it, False if the path is still unknown
+    (caller should leave the row as 'queued' for the retry worker).
+    """
+    if lxmf_router is None or local_destination is None:
+        return False
+
+    try:
+        dest_hash = normalize_hash(to_hash)
+    except ValueError:
+        # Row was validated at insert time; a bad stored hash is unrecoverable.
+        RNS.log(
+            f"[MeshChat] msg {msg_id}: stored hash {to_hash!r} is invalid, marking failed",
+            RNS.LOG_ERROR,
+        )
+        return False
+
+    if not RNS.Transport.has_path(dest_hash):
+        RNS.Transport.request_path(dest_hash)
+
+    recipient_identity = RNS.Identity.recall(dest_hash)
+    if recipient_identity is None:
+        return False
+
+    rns_dest = RNS.Destination(
+        recipient_identity,
+        RNS.Destination.OUT,
+        RNS.Destination.SINGLE,
+        "lxmf",
+        "delivery",
+    )
+    lxmf_message = LXMF.LXMessage(
+        rns_dest,
+        local_destination,
+        body,
+        desired_method=LXMF.LXMessage.DIRECT,
+    )
+
+    cb = _make_delivery_status_callback(msg_id)
+    lxmf_message.register_delivery_callback(cb)
+    failed_register = getattr(lxmf_message, "register_failed_callback", None)
+    if callable(failed_register):
+        failed_register(cb)
+
+    lxmf_router.handle_outbound(lxmf_message)
+    return True
+
+
+def _mark_outbound(msg_id: int) -> None:
+    with get_db() as db:
+        db.execute("UPDATE messages SET status=? WHERE id=?", ("outbound", msg_id))
+        db.commit()
+
+
+def _schedule_retry_or_fail(msg_id: int, attempts_so_far: int) -> str:
+    """Bump attempts and either schedule a retry or flip to failed.
+
+    Returns the new status string for logging / broadcasting.
+    """
+    next_attempts = attempts_so_far + 1
+    if next_attempts >= len(QUEUED_RETRY_DELAYS):
+        with get_db() as db:
+            db.execute(
+                "UPDATE messages SET status=?, attempts=?, next_retry_at=NULL WHERE id=?",
+                ("failed", next_attempts, msg_id),
+            )
+            db.commit()
+        return "failed"
+    delay = QUEUED_RETRY_DELAYS[next_attempts]
+    next_at = time.time() + delay
+    with get_db() as db:
+        db.execute(
+            "UPDATE messages SET attempts=?, next_retry_at=? WHERE id=?",
+            (next_attempts, next_at, msg_id),
+        )
+        db.commit()
+    return "queued"
+
+
+async def _queued_retry_loop():
+    """Background task: walk queued rows whose next_retry_at has passed and
+    attempt LXMF submission. Stops ticking individual rows after the retry
+    schedule is exhausted, flipping them to 'failed'."""
+    while True:
+        try:
+            await asyncio.sleep(QUEUED_RETRY_TICK)
+            if not rns_ready:
+                continue
+            now = time.time()
+            with get_db() as db:
+                rows = db.execute(
+                    "SELECT id, to_hash, body, COALESCE(attempts, 0) AS attempts "
+                    "FROM messages "
+                    "WHERE status = 'queued' "
+                    "  AND (next_retry_at IS NULL OR next_retry_at <= ?)",
+                    (now,),
+                ).fetchall()
+            for r in rows:
+                msg_id = r["id"]
+                ok = _try_submit_outbound(msg_id, r["to_hash"], r["body"])
+                if ok:
+                    _mark_outbound(msg_id)
+                    await manager.broadcast(
+                        {"type": "status_update", "msg_id": msg_id, "status": "outbound"}
+                    )
+                else:
+                    new_status = _schedule_retry_or_fail(msg_id, r["attempts"])
+                    if new_status == "failed":
+                        await manager.broadcast(
+                            {"type": "status_update", "msg_id": msg_id, "status": "failed"}
+                        )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            RNS.log(f"[MeshChat] retry loop error: {e}", RNS.LOG_ERROR)
+
+
 @app.post("/api/messages")
 async def api_send_message(payload: dict):
     """
@@ -554,7 +717,7 @@ async def api_send_message(payload: dict):
         return JSONResponse({"error": "missing 'to' or 'body'"}, status_code=400)
 
     try:
-        dest_hash = normalize_hash(to_hash)
+        normalize_hash(to_hash)
     except ValueError:
         RNS.log(
             f"[MeshChat] /api/messages rejected: invalid dest hash {to_hash!r}",
@@ -564,82 +727,36 @@ async def api_send_message(payload: dict):
 
     ts = time.time()
 
-    # Store outbound immediately
+    # Persist as queued with next_retry_at=0 so the retry worker will pick
+    # it up on the next tick if the first-shot synchronous attempt fails.
     with get_db() as db:
         cursor = db.execute(
-            "INSERT INTO messages (ts, direction, to_hash, body, status) VALUES (?,?,?,?,?)",
-            (ts, "out", to_hash, body, "queued"),
+            "INSERT INTO messages "
+            "(ts, direction, to_hash, body, status, attempts, next_retry_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (ts, "out", to_hash, body, "queued", 0, 0.0),
         )
         msg_id = cursor.lastrowid
         db.commit()
 
-    # Look up recipient — request path if not yet known
-    if not RNS.Transport.has_path(dest_hash):
-        RNS.Transport.request_path(dest_hash)
-
-    recipient_identity = RNS.Identity.recall(dest_hash)
-    if recipient_identity is None:
-        # Path not yet known. Leave the row as 'queued' so the retry task
-        # (wt1.1) can pick it up once the path resolves, and return 202.
-        return JSONResponse(
-            {
-                "id": msg_id,
-                "status": "path_requested",
-                "detail": "destination path unknown, request sent — retry in a few seconds",
-            },
-            status_code=202,
+    # First-shot synchronous attempt — if the path is already cached, the
+    # message is in LXMF's hands before the HTTP response returns.
+    if _try_submit_outbound(msg_id, to_hash, body):
+        _mark_outbound(msg_id)
+        await manager.broadcast(
+            {"type": "status_update", "msg_id": msg_id, "status": "outbound"}
         )
+        return {"id": msg_id, "status": "outbound", "ts": ts}
 
-    rns_dest = RNS.Destination(
-        recipient_identity,
-        RNS.Destination.OUT,
-        RNS.Destination.SINGLE,
-        "lxmf",
-        "delivery",
+    # Path unknown; caller gets 202 and the retry worker will try again.
+    return JSONResponse(
+        {
+            "id": msg_id,
+            "status": "path_requested",
+            "detail": "destination path unknown, request sent — will retry automatically",
+        },
+        status_code=202,
     )
-
-    # Create LXMF message and queue for delivery
-    # LXMessage(destination, source, content, title, desired_method)
-    lxmf_message = LXMF.LXMessage(
-        rns_dest,
-        local_destination,
-        body,
-        desired_method=LXMF.LXMessage.DIRECT,
-    )
-
-    def delivery_status_callback(msg):
-        status = lxmf_status_name(msg.state)
-        with get_db() as db:
-            db.execute("UPDATE messages SET status=? WHERE id=?", (status, msg_id))
-            db.commit()
-        _broadcast_from_thread(
-            {
-                "type": "status_update",
-                "msg_id": msg_id,
-                "status": status,
-            }
-        )
-
-    lxmf_message.register_delivery_callback(delivery_status_callback)
-    # LXMF also exposes a failed-callback on some versions; register if present.
-    failed_register = getattr(lxmf_message, "register_failed_callback", None)
-    if callable(failed_register):
-        failed_register(delivery_status_callback)
-
-    lxmf_router.handle_outbound(lxmf_message)
-
-    # Hand-off to LXMRouter was successful; move out of 'queued' so the
-    # retry worker (wt1.1) doesn't pick this row up.
-    with get_db() as db:
-        db.execute(
-            "UPDATE messages SET status=? WHERE id=?", ("outbound", msg_id)
-        )
-        db.commit()
-    await manager.broadcast(
-        {"type": "status_update", "msg_id": msg_id, "status": "outbound"}
-    )
-
-    return {"id": msg_id, "status": "outbound", "ts": ts}
 
 
 # ── WebSocket ────────────────────────────────────────────────────────────────
