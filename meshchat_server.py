@@ -54,6 +54,16 @@ def get_display_name():
     return load_config().get("display_name", "my-node")
 
 
+def get_wifi_ssid():
+    return load_config().get("wifi_ssid", "")
+
+
+def normalize_hash(s: str) -> bytes:
+    """Strip prettyhexrep decorations (<, >, ., whitespace) and return raw bytes."""
+    cleaned = "".join(c for c in (s or "") if c in "0123456789abcdefABCDEF")
+    return bytes.fromhex(cleaned)
+
+
 # ── Database ────────────────────────────────────────────────────────────────
 # One connection per call is fine; WAL mode (set once in init_db) lets readers
 # and a single writer run concurrently so RNS callback threads and FastAPI
@@ -123,48 +133,95 @@ lxmf_router: Optional[LXMF.LXMRouter] = None
 local_destination: Optional[RNS.Destination] = (
     None  # returned by register_delivery_identity
 )
+main_loop: Optional[asyncio.AbstractEventLoop] = None
+
+# Rate-limit auto-reply announces so 2+ nodes don't echo each other forever.
+ANNOUNCE_REPLY_COOLDOWN = 20.0
+last_announce_ts: float = 0.0
 
 
-def announce_received_callback(destination_hash, announced_identity, app_data):
-    """Called when an announce is received from another node."""
-    dest_hash_hex = RNS.prettyhexrep(destination_hash)
-    display_name = None
-    if app_data:
-        try:
-            display_name = app_data.decode("utf-8")
-        except Exception:
-            pass
+def send_announce(reason: str):
+    """Broadcast our identity and record the timestamp for reply rate-limiting."""
+    global last_announce_ts
+    if local_destination is None:
+        return
+    local_destination.announce(app_data=get_display_name().encode("utf-8"))
+    last_announce_ts = time.time()
+    RNS.log(f"[MeshChat] Announce sent ({reason})")
 
-    ts = time.time()
-    with get_db() as db:
-        existing = db.execute("SELECT hash FROM peers WHERE hash = ?", (dest_hash_hex,)).fetchone()
-        if existing:
-            db.execute(
-                "UPDATE peers SET display_name = ?, last_seen = ? WHERE hash = ?",
-                (display_name, ts, dest_hash_hex),
-            )
-        else:
-            db.execute(
-                "INSERT INTO peers (hash, display_name, first_seen, last_seen) VALUES (?, ?, ?, ?)",
-                (dest_hash_hex, display_name, ts, ts),
-            )
-        db.commit()
 
-    RNS.log(f"[MeshChat] Announce from {dest_hash_hex} ({display_name or 'unnamed'})")
-
-    payload = {
-        "type": "peer_discovered",
-        "hash": dest_hash_hex,
-        "display_name": display_name,
-        "last_seen": ts,
-    }
+def _broadcast_from_thread(payload: dict):
+    """Schedule a WebSocket broadcast from a non-async (RNS) thread."""
+    if main_loop is None:
+        RNS.log("[MeshChat] Cannot broadcast: main_loop not set", RNS.LOG_ERROR)
+        return
     try:
-        loop = asyncio.get_event_loop()
-        loop.call_soon_threadsafe(
-            lambda: asyncio.ensure_future(manager.broadcast(payload))
+        asyncio.run_coroutine_threadsafe(manager.broadcast(payload), main_loop)
+        RNS.log(f"[MeshChat] Broadcast scheduled: {payload.get('type')}")
+    except Exception as e:
+        RNS.log(f"[MeshChat] Broadcast failed: {e}", RNS.LOG_ERROR)
+
+
+class MeshChatAnnounceHandler:
+    """Reticulum announce handler — must expose aspect_filter + received_announce."""
+
+    aspect_filter = "lxmf.delivery"
+
+    def received_announce(self, destination_hash, announced_identity, app_data):
+        dest_hash_hex = RNS.prettyhexrep(destination_hash)
+        display_name = None
+        if app_data:
+            try:
+                display_name = app_data.decode("utf-8")
+            except Exception:
+                pass
+
+        RNS.log(
+            f"[MeshChat] received_announce: {dest_hash_hex} "
+            f"({display_name or 'unnamed'})"
         )
-    except RuntimeError:
-        pass
+
+        ts = time.time()
+        try:
+            with get_db() as db:
+                existing = db.execute(
+                    "SELECT hash FROM peers WHERE hash = ?", (dest_hash_hex,)
+                ).fetchone()
+                if existing:
+                    db.execute(
+                        "UPDATE peers SET display_name = ?, last_seen = ? WHERE hash = ?",
+                        (display_name, ts, dest_hash_hex),
+                    )
+                else:
+                    db.execute(
+                        "INSERT INTO peers (hash, display_name, first_seen, last_seen) VALUES (?, ?, ?, ?)",
+                        (dest_hash_hex, display_name, ts, ts),
+                    )
+                db.commit()
+            RNS.log(f"[MeshChat] Peer {dest_hash_hex} written to DB")
+        except Exception as e:
+            RNS.log(f"[MeshChat] DB write failed in announce handler: {e}", RNS.LOG_ERROR)
+            return
+
+        _broadcast_from_thread(
+            {
+                "type": "peer_discovered",
+                "hash": dest_hash_hex,
+                "display_name": display_name,
+                "last_seen": ts,
+            }
+        )
+
+        # Auto-reply so the announcing node can discover us too, but rate-
+        # limited so a pair of nodes doesn't echo each other forever.
+        since_last = ts - last_announce_ts
+        if since_last > ANNOUNCE_REPLY_COOLDOWN:
+            send_announce(f"reply to {dest_hash_hex}")
+        else:
+            RNS.log(
+                f"[MeshChat] Skipping reply announce "
+                f"(last announce {since_last:.1f}s ago)"
+            )
 
 
 def lxmf_delivery_callback(message: LXMF.LXMessage):
@@ -188,9 +245,7 @@ def lxmf_delivery_callback(message: LXMF.LXMessage):
         "body": body,
         "time": datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%H:%M"),
     }
-    asyncio.get_event_loop().call_soon_threadsafe(
-        lambda: asyncio.ensure_future(manager.broadcast(payload))
-    )
+    _broadcast_from_thread(payload)
 
 
 def start_reticulum():
@@ -214,19 +269,21 @@ def start_reticulum():
     )
     lxmf_router.register_delivery_callback(lxmf_delivery_callback)
 
-    RNS.Transport.register_announce_handler(announce_received_callback)
-
-    # Auto-announce on boot so other nodes discover us
-    local_destination.announce(app_data=get_display_name().encode("utf-8"))
+    RNS.Transport.register_announce_handler(MeshChatAnnounceHandler())
 
     RNS.log(
         f"[MeshChat] LXMF ready. Address: {RNS.prettyhexrep(local_destination.hash)}"
     )
 
+    # Auto-announce on boot so other nodes discover us
+    send_announce("startup")
+
 
 # ── App lifespan ────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global main_loop
+    main_loop = asyncio.get_running_loop()
     init_db()
     start_reticulum()
     yield
@@ -245,6 +302,7 @@ def api_identity():
     return {
         "hash": RNS.prettyhexrep(local_destination.hash),
         "display_name": get_display_name(),
+        "wifi_ssid": get_wifi_ssid(),
     }
 
 
@@ -263,11 +321,28 @@ async def api_set_display_name(payload: dict):
     return {"display_name": name}
 
 
+@app.put("/api/wifi_ssid")
+async def api_set_wifi_ssid(payload: dict):
+    ssid = (payload or {}).get("wifi_ssid", "").strip()
+    if not ssid:
+        return JSONResponse({"error": "wifi_ssid is required"}, status_code=400)
+    if len(ssid) > 32:
+        return JSONResponse({"error": "wifi_ssid too long (max 32)"}, status_code=400)
+    cfg = load_config()
+    cfg["wifi_ssid"] = ssid
+    save_config(cfg)
+    return {"wifi_ssid": ssid}
+
+
 @app.post("/api/announce")
 def api_announce():
     if local_destination is None:
         return JSONResponse({"error": "not ready"}, status_code=503)
-    local_destination.announce(app_data=get_display_name().encode("utf-8"))
+    RNS.log(
+        f"[MeshChat] /api/announce triggered from "
+        f"{RNS.prettyhexrep(local_destination.hash)}"
+    )
+    send_announce("manual")
     return {"status": "announced"}
 
 
@@ -281,8 +356,7 @@ def api_peers():
     for r in rows:
         peer = dict(r)
         try:
-            dest_hash = bytes.fromhex(r["hash"].replace(".", ""))
-            peer["has_path"] = RNS.Transport.has_path(dest_hash)
+            peer["has_path"] = RNS.Transport.has_path(normalize_hash(r["hash"]))
         except Exception:
             peer["has_path"] = False
         peers.append(peer)
@@ -324,8 +398,12 @@ async def api_send_message(payload: dict):
         return JSONResponse({"error": "missing 'to' or 'body'"}, status_code=400)
 
     try:
-        dest_hash = bytes.fromhex(to_hash.replace(".", ""))
+        dest_hash = normalize_hash(to_hash)
     except ValueError:
+        RNS.log(
+            f"[MeshChat] /api/messages rejected: invalid dest hash {to_hash!r}",
+            RNS.LOG_ERROR,
+        )
         return JSONResponse({"error": "invalid destination hash"}, status_code=400)
 
     ts = time.time()
@@ -385,16 +463,12 @@ async def api_send_message(payload: dict):
         with get_db() as db:
             db.execute("UPDATE messages SET status=? WHERE id=?", (status, msg_id))
             db.commit()
-        asyncio.get_event_loop().call_soon_threadsafe(
-            lambda: asyncio.ensure_future(
-                manager.broadcast(
-                    {
-                        "type": "status_update",
-                        "msg_id": msg_id,
-                        "status": status,
-                    }
-                )
-            )
+        _broadcast_from_thread(
+            {
+                "type": "status_update",
+                "msg_id": msg_id,
+                "status": status,
+            }
         )
 
     lxmf_message.register_delivery_callback(delivery_status_callback)

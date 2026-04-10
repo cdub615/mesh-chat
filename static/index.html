@@ -218,56 +218,88 @@
       position: fixed; inset: 0; z-index: 200;
       background: var(--bg-base);
       display: flex; flex-direction: column; align-items: center; justify-content: center;
-      padding: 32px; text-align: center; gap: 24px;
+      padding: 24px; gap: 20px;
       transition: opacity .3s;
     }
     #offline-overlay.hidden { opacity: 0; pointer-events: none; }
-    #offline-overlay svg { width: 72px; height: 72px; color: var(--text-muted); opacity: .6; }
-    #offline-overlay h2 { font-family: var(--font-ui); font-size: 20px; font-weight: 600; color: var(--text-primary); }
-    #offline-overlay p { font-family: var(--font-ui); font-size: 15px; color: var(--text-secondary); line-height: 1.6; max-width: 320px; }
-    #offline-overlay .steps { text-align: left; max-width: 300px; }
-    #offline-overlay .steps li {
-      font-family: var(--font-ui); font-size: 14px; color: var(--text-secondary);
-      line-height: 1.6; margin-bottom: 8px; list-style: none; padding-left: 24px; position: relative;
+    .ap-icon-wrap {
+      width: 100%; max-width: 360px;
+      display: flex; align-items: center; justify-content: center;
+      padding: 32px 0 24px; background: var(--amber-dim);
+      border: 1px solid rgba(245,158,11,0.12); border-radius: var(--radius-lg);
     }
-    #offline-overlay .steps li::before {
-      content: attr(data-n); position: absolute; left: 0; color: var(--accent); font-weight: 600;
-      font-family: var(--font-mono); font-size: 13px;
+    .ap-bars { display: flex; align-items: flex-end; gap: 5px; height: 32px; }
+    .ap-bar { width: 7px; border-radius: 3px; background: var(--amber); animation: ap-breathe 2s ease-in-out infinite; }
+    .ap-bar:nth-child(1) { height: 8px;  animation-delay: 0s;   opacity: .25; }
+    .ap-bar:nth-child(2) { height: 16px; animation-delay: .15s; opacity: .25; }
+    .ap-bar:nth-child(3) { height: 24px; animation-delay: .3s;  opacity: .25; }
+    .ap-bar:nth-child(4) { height: 32px; animation-delay: .45s; opacity: .25; }
+    @keyframes ap-breathe { 0%,100%{opacity:.2} 50%{opacity:.85} }
+    #offline-overlay h2 { font-family: var(--font-ui); font-size: 18px; font-weight: 600; color: var(--text-primary); margin: 0; }
+    #offline-overlay .overlay-sub { font-family: var(--font-ui); font-size: 14px; color: var(--text-secondary); line-height: 1.5; max-width: 320px; text-align: center; }
+    .overlay-steps { display: flex; flex-direction: column; gap: 10px; width: 100%; max-width: 360px; }
+    .overlay-step {
+      display: flex; align-items: center; gap: 12px;
+      background: var(--bg-elevated); border: 1px solid var(--border);
+      border-radius: var(--radius-md); padding: 14px 16px;
+    }
+    .step-num {
+      width: 24px; height: 24px; border-radius: 50%; flex-shrink: 0;
+      background: var(--accent); color: #0a0a0a;
+      font-family: var(--font-mono); font-size: 12px; font-weight: 700;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .overlay-step span { font-family: var(--font-ui); font-size: 14px; color: var(--text-secondary); }
+    .overlay-step strong { color: var(--text-primary); font-weight: 600; }
+    .ssid-badge {
+      display: inline-block; background: var(--accent-dim); color: var(--accent);
+      border: 1px solid rgba(34,197,94,0.25); border-radius: 99px;
+      padding: 2px 10px; font-family: var(--font-mono); font-size: 12px; font-weight: 500;
+      margin-left: 4px;
     }
     #offline-overlay .retry-btn {
+      width: 100%; max-width: 360px;
       font-family: var(--font-ui); font-size: 14px; font-weight: 500;
       background: var(--bg-elevated); color: var(--text-primary);
-      border: 1px solid var(--border); border-radius: var(--radius-sm);
-      padding: 10px 24px; cursor: pointer; transition: border-color .15s;
+      border: 1px solid var(--border); border-radius: var(--radius-md);
+      padding: 14px; cursor: pointer; transition: border-color .15s;
     }
     #offline-overlay .retry-btn:hover { border-color: var(--border-hover); }
     #offline-overlay .retry-btn:active { background: var(--bg-input); }
+    .overlay-footer { display: flex; flex-direction: column; align-items: center; gap: 4px; margin-top: 8px; }
+    .overlay-footer span { font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); }
   </style>
 </head>
 <body>
 
 <div id="offline-overlay" class="hidden">
-  <svg viewBox="0 0 72 72" fill="none" xmlns="http://www.w3.org/2000/svg">
-    <circle cx="36" cy="28" r="4" fill="currentColor"/>
-    <circle cx="18" cy="44" r="3" fill="currentColor" opacity="0.5"/>
-    <circle cx="54" cy="44" r="3" fill="currentColor" opacity="0.5"/>
-    <circle cx="12" cy="28" r="2.5" fill="currentColor" opacity="0.3"/>
-    <circle cx="60" cy="28" r="2.5" fill="currentColor" opacity="0.3"/>
-    <line x1="36" y1="28" x2="18" y2="44" stroke="currentColor" stroke-width="1.5" opacity="0.3" stroke-dasharray="3 3"/>
-    <line x1="36" y1="28" x2="54" y2="44" stroke="currentColor" stroke-width="1.5" opacity="0.3" stroke-dasharray="3 3"/>
-    <line x1="36" y1="28" x2="12" y2="28" stroke="currentColor" stroke-width="1.5" opacity="0.3" stroke-dasharray="3 3"/>
-    <line x1="36" y1="28" x2="60" y2="28" stroke="currentColor" stroke-width="1.5" opacity="0.3" stroke-dasharray="3 3"/>
-    <line x1="28" y1="58" x2="44" y2="58" stroke="currentColor" stroke-width="2" stroke-linecap="round" opacity="0.5"/>
-    <line x1="32" y1="62" x2="40" y2="62" stroke="currentColor" stroke-width="2" stroke-linecap="round" opacity="0.3"/>
-  </svg>
-  <h2>Not connected to your node</h2>
-  <p>MeshChat needs to be on the same Wi-Fi network as your node to work.</p>
-  <ol class="steps">
-    <li data-n="1.">Open your device's Wi-Fi settings</li>
-    <li data-n="2.">Connect to your node's network</li>
-    <li data-n="3.">Come back here once you're connected</li>
-  </ol>
+  <div class="ap-icon-wrap">
+    <div class="ap-bars">
+      <div class="ap-bar"></div><div class="ap-bar"></div>
+      <div class="ap-bar"></div><div class="ap-bar"></div>
+    </div>
+  </div>
+  <h2>Node unreachable</h2>
+  <p class="overlay-sub">Connect your device to the node's WiFi network to use MeshChat.</p>
+  <div class="overlay-steps">
+    <div class="overlay-step">
+      <div class="step-num">1</div>
+      <span>Open <strong>Settings</strong> → <strong>Wi-Fi</strong></span>
+    </div>
+    <div class="overlay-step">
+      <div class="step-num">2</div>
+      <span>Connect to <span class="ssid-badge" id="overlay-ssid">your node's network</span></span>
+    </div>
+    <div class="overlay-step">
+      <div class="step-num">3</div>
+      <span>Tap <strong>Try again</strong> below</span>
+    </div>
+  </div>
   <button class="retry-btn" onclick="retryConnection()">Try again</button>
+  <div class="overlay-footer">
+    <span>meshchat · reticulum node</span>
+    <span>looking for <span id="overlay-server-addr"></span></span>
+  </div>
 </div>
 
 <div id="app">
@@ -360,6 +392,16 @@
                  onkeydown="if(event.key==='Enter'){event.preventDefault();this.blur()}">—</div>
           </div>
         </div>
+        <div class="settings-row">
+          <div><div class="settings-label">WiFi SSID</div><div class="settings-desc">shown on offline screen</div></div>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <div class="settings-value" id="wifi-ssid-val" contenteditable="true" spellcheck="false"
+                 style="min-width:60px;padding:2px 6px;border:1px solid transparent;border-radius:var(--radius-sm);outline:none;transition:border-color .15s;cursor:text;"
+                 onfocus="this.style.borderColor='var(--border-hover)'"
+                 onblur="this.style.borderColor='transparent'; saveWifiSsid(this.textContent)"
+                 onkeydown="if(event.key==='Enter'){event.preventDefault();this.blur()}">—</div>
+          </div>
+        </div>
       </div>
       <div class="section-header">connection</div>
       <div class="settings-group">
@@ -427,18 +469,33 @@ window.addEventListener('load', async () => {
 // ── Identity ─────────────────────────────────────────────────────────────────
 async function loadIdentity() {
   try {
-    const d = await fetch(`${API}/api/identity`).then(r => r.json());
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 5000);
+    const d = await fetch(`${API}/api/identity`, { signal: ctrl.signal }).then(r => r.json());
+    clearTimeout(timer);
     myHash = d.hash;
     document.getElementById('node-addr').textContent      = shortHash(myHash);
     document.getElementById('full-addr').textContent      = myHash;
     document.getElementById('display-name-val').textContent = d.display_name || '—';
+    document.getElementById('wifi-ssid-val').textContent   = d.wifi_ssid || '—';
     document.getElementById('iface-status').textContent   = 'active';
     document.getElementById('iface-status').style.color   = 'var(--accent)';
     document.getElementById('send-btn').disabled = false;
     document.getElementById('offline-overlay').classList.add('hidden');
+    if (d.wifi_ssid) localStorage.setItem('meshchat_wifi_ssid', d.wifi_ssid);
+    localStorage.setItem('meshchat_server_addr', window.location.host);
   } catch {
-    document.getElementById('offline-overlay').classList.remove('hidden');
+    showOfflineOverlay();
   }
+}
+
+function showOfflineOverlay() {
+  const cachedSsid = localStorage.getItem('meshchat_wifi_ssid');
+  const ssidEl = document.getElementById('overlay-ssid');
+  if (ssidEl) ssidEl.textContent = cachedSsid || "your node's network";
+  const addrEl = document.getElementById('overlay-server-addr');
+  if (addrEl) addrEl.textContent = localStorage.getItem('meshchat_server_addr') || window.location.host;
+  document.getElementById('offline-overlay').classList.remove('hidden');
 }
 
 async function retryConnection() {
@@ -537,9 +594,7 @@ function connectWS() {
 }
 
 window.addEventListener('online', () => retryConnection());
-window.addEventListener('offline', () => {
-  document.getElementById('offline-overlay').classList.remove('hidden');
-});
+window.addEventListener('offline', () => showOfflineOverlay());
 
 // ── Send ─────────────────────────────────────────────────────────────────────
 async function sendMessage() {
@@ -811,6 +866,26 @@ async function saveDisplayName(name) {
     } else {
       const d = await res.json();
       toast(d.error || 'could not save name');
+    }
+  } catch {
+    toast('network error');
+  }
+}
+
+async function saveWifiSsid(ssid) {
+  ssid = ssid.trim();
+  if (!ssid || ssid === '—') return;
+  try {
+    const res = await fetch(`${API}/api/wifi_ssid`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ wifi_ssid: ssid }),
+    });
+    if (res.ok) {
+      localStorage.setItem('meshchat_wifi_ssid', ssid);
+      toast('wifi ssid saved');
+    } else {
+      const d = await res.json();
+      toast(d.error || 'could not save ssid');
     }
   } catch {
     toast('network error');
