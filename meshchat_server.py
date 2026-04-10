@@ -59,8 +59,16 @@ def get_wifi_ssid():
 
 
 def normalize_hash(s: str) -> bytes:
-    """Strip prettyhexrep decorations (<, >, ., whitespace) and return raw bytes."""
+    """Strip prettyhexrep decorations (<, >, ., whitespace) and return raw bytes.
+
+    Raises ValueError if the cleaned hex is not exactly 32 characters (16 bytes),
+    which is the Reticulum destination hash truncation size.
+    """
     cleaned = "".join(c for c in (s or "") if c in "0123456789abcdefABCDEF")
+    if len(cleaned) != 32:
+        raise ValueError(
+            f"destination hash must be 32 hex characters (got {len(cleaned)}): {s!r}"
+        )
     return bytes.fromhex(cleaned)
 
 
@@ -357,7 +365,11 @@ def api_peers():
         peer = dict(r)
         try:
             peer["has_path"] = RNS.Transport.has_path(normalize_hash(r["hash"]))
-        except Exception:
+        except ValueError as e:
+            RNS.log(
+                f"[MeshChat] /api/peers: skipping malformed stored hash {r['hash']!r}: {e}",
+                RNS.LOG_WARNING,
+            )
             peer["has_path"] = False
         peers.append(peer)
     return peers
