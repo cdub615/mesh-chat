@@ -55,14 +55,19 @@ def get_display_name():
 
 
 # ── Database ────────────────────────────────────────────────────────────────
+# One connection per call is fine; WAL mode (set once in init_db) lets readers
+# and a single writer run concurrently so RNS callback threads and FastAPI
+# handlers don't trip 'database is locked'. `timeout` covers brief contention.
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
     conn.row_factory = sqlite3.Row
     return conn
 
 
 def init_db():
     with get_db() as db:
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute("PRAGMA synchronous=NORMAL")
         db.execute("""
             CREATE TABLE IF NOT EXISTS messages (
                 id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -82,6 +87,9 @@ def init_db():
                 last_seen    REAL NOT NULL
             )
         """)
+        db.execute("CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_messages_to_hash ON messages(to_hash)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_messages_from_hash ON messages(from_hash)")
         db.commit()
 
 
