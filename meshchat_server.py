@@ -15,6 +15,8 @@ import asyncio
 import json
 import os
 import sqlite3
+import tempfile
+import threading
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -40,14 +42,44 @@ PORT = 8080
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
+# Serializes read-modify-write on config.json so two concurrent PUTs to
+# different keys can't clobber each other or corrupt the file.
+_config_lock = threading.Lock()
+
+
 def load_config():
     if CONFIG_PATH.exists():
         return json.loads(CONFIG_PATH.read_text())
     return {}
 
 
-def save_config(cfg):
-    CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
+def _atomic_write(path: Path, text: str) -> None:
+    """Write text to path atomically via tempfile + os.replace."""
+    # Same directory so os.replace is atomic (same filesystem).
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def update_config(**updates) -> dict:
+    """Locked read-modify-write on config.json. Returns the new config dict."""
+    with _config_lock:
+        cfg = load_config()
+        cfg.update(updates)
+        _atomic_write(CONFIG_PATH, json.dumps(cfg, indent=2))
+        return cfg
 
 
 def get_display_name():
@@ -325,9 +357,7 @@ async def api_set_display_name(payload: dict):
         return JSONResponse({"error": "display_name is required"}, status_code=400)
     if len(name) > 32:
         return JSONResponse({"error": "display_name too long (max 32)"}, status_code=400)
-    cfg = load_config()
-    cfg["display_name"] = name
-    save_config(cfg)
+    update_config(display_name=name)
     if local_destination is not None:
         local_destination.display_name = name
     return {"display_name": name}
@@ -340,9 +370,7 @@ async def api_set_wifi_ssid(payload: dict):
         return JSONResponse({"error": "wifi_ssid is required"}, status_code=400)
     if len(ssid) > 32:
         return JSONResponse({"error": "wifi_ssid too long (max 32)"}, status_code=400)
-    cfg = load_config()
-    cfg["wifi_ssid"] = ssid
-    save_config(cfg)
+    update_config(wifi_ssid=ssid)
     return {"wifi_ssid": ssid}
 
 
