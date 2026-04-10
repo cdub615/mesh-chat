@@ -114,6 +114,16 @@ def get_db():
     return conn
 
 
+def _column_names(db, table: str) -> set:
+    return {row[1] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _add_column_if_missing(db, table: str, column: str, decl: str) -> None:
+    """Idempotent ALTER TABLE ADD COLUMN — survives repeated startup."""
+    if column not in _column_names(db, table):
+        db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
 def init_db():
     with get_db() as db:
         db.execute("PRAGMA journal_mode=WAL")
@@ -126,7 +136,7 @@ def init_db():
                 from_hash TEXT,
                 to_hash   TEXT,
                 body      TEXT    NOT NULL,
-                status    TEXT    DEFAULT 'sent'  -- 'sent' | 'queued' | 'delivered' | 'failed'
+                status    TEXT    DEFAULT 'sent'
             )
         """)
         db.execute("""
@@ -137,9 +147,17 @@ def init_db():
                 last_seen    REAL NOT NULL
             )
         """)
+        # Schema additions (idempotent). SQLite can't add a UNIQUE column via
+        # ALTER, so enforce uniqueness with a partial index that ignores NULLs
+        # (outbound rows don't have an lxmf_hash).
+        _add_column_if_missing(db, "messages", "lxmf_hash", "TEXT")
         db.execute("CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_messages_to_hash ON messages(to_hash)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_messages_from_hash ON messages(from_hash)")
+        db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_lxmf_hash "
+            "ON messages(lxmf_hash) WHERE lxmf_hash IS NOT NULL"
+        )
         db.commit()
 
 
@@ -304,13 +322,28 @@ def lxmf_delivery_callback(message: LXMF.LXMessage):
     body = message.content.decode("utf-8", errors="replace") if message.content else ""
     ts = time.time()
 
-    # Store in DB
+    # LXMF gives each message a unique hash; use it as the dedupe key so
+    # retransmissions and propagation-node redelivery don't double-insert.
+    raw_hash = getattr(message, "hash", None)
+    lxmf_hash = raw_hash.hex() if isinstance(raw_hash, (bytes, bytearray)) else None
+
+    # Store in DB (INSERT OR IGNORE on lxmf_hash — if the row already exists
+    # the rowcount stays 0 and we skip the broadcast).
     with get_db() as db:
-        db.execute(
-            "INSERT INTO messages (ts, direction, from_hash, body, status) VALUES (?,?,?,?,?)",
-            (ts, "in", from_hash, body, "delivered"),
+        cursor = db.execute(
+            "INSERT OR IGNORE INTO messages "
+            "(ts, direction, from_hash, body, status, lxmf_hash) "
+            "VALUES (?,?,?,?,?,?)",
+            (ts, "in", from_hash, body, "delivered", lxmf_hash),
         )
         db.commit()
+        inserted = cursor.rowcount > 0
+
+    if not inserted:
+        RNS.log(
+            f"[MeshChat] Duplicate inbound dropped (lxmf_hash={lxmf_hash})"
+        )
+        return
 
     # Push to all connected WebSocket clients
     payload = {
