@@ -435,20 +435,8 @@ async def api_send_message(payload: dict):
 
     recipient_identity = RNS.Identity.recall(dest_hash)
     if recipient_identity is None:
-        # Path not yet known; still queue the message — LXMRouter will retry
-        # Build destination speculatively so LXMRouter can resolve it later
-        pass
-
-    if recipient_identity is not None:
-        rns_dest = RNS.Destination(
-            recipient_identity,
-            RNS.Destination.OUT,
-            RNS.Destination.SINGLE,
-            "lxmf",
-            "delivery",
-        )
-    else:
-        # Destination unknown yet; return 202 Accepted and let caller retry
+        # Path not yet known. Leave the row as 'queued' so the retry task
+        # (wt1.1) can pick it up once the path resolves, and return 202.
         return JSONResponse(
             {
                 "id": msg_id,
@@ -457,6 +445,14 @@ async def api_send_message(payload: dict):
             },
             status_code=202,
         )
+
+    rns_dest = RNS.Destination(
+        recipient_identity,
+        RNS.Destination.OUT,
+        RNS.Destination.SINGLE,
+        "lxmf",
+        "delivery",
+    )
 
     # Create LXMF message and queue for delivery
     # LXMessage(destination, source, content, title, desired_method)
