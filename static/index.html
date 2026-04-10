@@ -471,8 +471,15 @@ async function loadIdentity() {
   try {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 5000);
-    const d = await fetch(`${API}/api/identity`, { signal: ctrl.signal }).then(r => r.json());
+    const r = await fetch(`${API}/api/identity`, { signal: ctrl.signal });
     clearTimeout(timer);
+    if (!r.ok) {
+      // Server is reachable but Reticulum isn't ready yet (e.g. RNode
+      // unplugged at boot). Fall through to the offline overlay so the
+      // user gets a clear signal instead of a broken-looking UI.
+      throw new Error(`identity not ready (${r.status})`);
+    }
+    const d = await r.json();
     myHash = d.hash;
     document.getElementById('node-addr').textContent      = shortHash(myHash);
     document.getElementById('full-addr').textContent      = myHash;

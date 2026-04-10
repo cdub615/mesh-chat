@@ -183,6 +183,13 @@ main_loop: Optional[asyncio.AbstractEventLoop] = None
 ANNOUNCE_REPLY_COOLDOWN = 20.0
 last_announce_ts: float = 0.0
 
+# Startup state for Reticulum/LXMF. If init fails (e.g. RNode unplugged,
+# ~/.reticulum/config missing), we keep the HTTP server up in degraded mode
+# and a background task retries every RNS_RETRY_INTERVAL seconds.
+rns_ready: bool = False
+rns_error: Optional[str] = None
+RNS_RETRY_INTERVAL = 30.0
+
 
 def send_announce(reason: str):
     """Broadcast our identity and record the timestamp for reply rate-limiting."""
@@ -292,35 +299,70 @@ def lxmf_delivery_callback(message: LXMF.LXMessage):
     _broadcast_from_thread(payload)
 
 
-def start_reticulum():
-    global lxmf_router, local_destination
+def start_reticulum() -> bool:
+    """Initialize Reticulum + LXMF. Returns True on success, False on failure.
 
-    RNS.Reticulum()  # Reticulum reads its own config at ~/.reticulum
+    On failure, sets rns_ready=False and rns_error so /api/identity can report
+    the degraded state. The caller (lifespan) schedules a retry loop.
+    """
+    global lxmf_router, local_destination, rns_ready, rns_error
 
-    # Load or create identity
-    if IDENTITY_PATH.exists():
-        identity = RNS.Identity.from_file(str(IDENTITY_PATH))
-        RNS.log(f"[MeshChat] Loaded identity: {RNS.prettyhexrep(identity.hash)}")
-    else:
-        identity = RNS.Identity()
-        identity.to_file(str(IDENTITY_PATH))
-        RNS.log(f"[MeshChat] Created new identity: {RNS.prettyhexrep(identity.hash)}")
+    try:
+        RNS.Reticulum()  # Reticulum reads its own config at ~/.reticulum
 
-    lxmf_router = LXMF.LXMRouter(storagepath=str(DATA_DIR / "lxmf"))
-    local_destination = lxmf_router.register_delivery_identity(
-        identity,
-        display_name=get_display_name(),
-    )
-    lxmf_router.register_delivery_callback(lxmf_delivery_callback)
+        # Load or create identity
+        if IDENTITY_PATH.exists():
+            identity = RNS.Identity.from_file(str(IDENTITY_PATH))
+            RNS.log(f"[MeshChat] Loaded identity: {RNS.prettyhexrep(identity.hash)}")
+        else:
+            identity = RNS.Identity()
+            identity.to_file(str(IDENTITY_PATH))
+            RNS.log(f"[MeshChat] Created new identity: {RNS.prettyhexrep(identity.hash)}")
 
-    RNS.Transport.register_announce_handler(MeshChatAnnounceHandler())
+        lxmf_router = LXMF.LXMRouter(storagepath=str(DATA_DIR / "lxmf"))
+        local_destination = lxmf_router.register_delivery_identity(
+            identity,
+            display_name=get_display_name(),
+        )
+        lxmf_router.register_delivery_callback(lxmf_delivery_callback)
 
-    RNS.log(
-        f"[MeshChat] LXMF ready. Address: {RNS.prettyhexrep(local_destination.hash)}"
-    )
+        RNS.Transport.register_announce_handler(MeshChatAnnounceHandler())
 
-    # Auto-announce on boot so other nodes discover us
-    send_announce("startup")
+        RNS.log(
+            f"[MeshChat] LXMF ready. Address: {RNS.prettyhexrep(local_destination.hash)}"
+        )
+
+        rns_ready = True
+        rns_error = None
+
+        # Auto-announce on boot so other nodes discover us
+        send_announce("startup")
+        return True
+
+    except Exception as e:
+        rns_ready = False
+        rns_error = f"{type(e).__name__}: {e}"
+        RNS.log(
+            f"[MeshChat] Reticulum init failed: {rns_error}. "
+            f"Common causes: ~/.reticulum/config is missing or invalid, "
+            f"the RNode device is not connected, or the identity file at "
+            f"{IDENTITY_PATH} is corrupt. HTTP server will keep running and "
+            f"retry every {int(RNS_RETRY_INTERVAL)}s.",
+            RNS.LOG_ERROR,
+        )
+        return False
+
+
+async def _rns_retry_loop():
+    """Periodically retry Reticulum init until it succeeds."""
+    while not rns_ready:
+        await asyncio.sleep(RNS_RETRY_INTERVAL)
+        RNS.log("[MeshChat] Retrying Reticulum init...")
+        # Run the sync init off the event loop so we don't block ws/http.
+        ok = await asyncio.get_running_loop().run_in_executor(None, start_reticulum)
+        if ok:
+            RNS.log("[MeshChat] Reticulum init recovered")
+            return
 
 
 # ── App lifespan ────────────────────────────────────────────────────────────
@@ -329,8 +371,13 @@ async def lifespan(app: FastAPI):
     global main_loop
     main_loop = asyncio.get_running_loop()
     init_db()
-    start_reticulum()
+    retry_task: Optional[asyncio.Task] = None
+    if not start_reticulum():
+        # Startup failed but the HTTP server stays up; schedule recovery.
+        retry_task = asyncio.create_task(_rns_retry_loop())
     yield
+    if retry_task is not None and not retry_task.done():
+        retry_task.cancel()
     # Reticulum / LXMF cleans up on process exit naturally
 
 
@@ -341,9 +388,18 @@ app = FastAPI(lifespan=lifespan)
 
 @app.get("/api/identity")
 def api_identity():
-    if local_destination is None:
-        return JSONResponse({"error": "not ready"}, status_code=503)
+    if not rns_ready or local_destination is None:
+        return JSONResponse(
+            {
+                "ready": False,
+                "error": rns_error or "Reticulum not initialized",
+                "display_name": get_display_name(),
+                "wifi_ssid": get_wifi_ssid(),
+            },
+            status_code=503,
+        )
     return {
+        "ready": True,
         "hash": RNS.prettyhexrep(local_destination.hash),
         "display_name": get_display_name(),
         "wifi_ssid": get_wifi_ssid(),
