@@ -172,6 +172,29 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
+
+# Map LXMessage.STATE_* integer values to the lowercase status string we
+# persist in the `messages` table and broadcast over WebSocket. Built by
+# introspection so new LXMF states are handled by name without a code edit.
+def _build_lxmf_state_map() -> dict:
+    mapping: dict = {}
+    for attr in dir(LXMF.LXMessage):
+        if not attr.startswith("STATE_"):
+            continue
+        value = getattr(LXMF.LXMessage, attr)
+        if isinstance(value, int):
+            mapping[value] = attr[len("STATE_"):].lower()
+    return mapping
+
+
+_LXMF_STATE_NAMES: dict = _build_lxmf_state_map()
+
+
+def lxmf_status_name(state) -> str:
+    """Return a canonical lowercase status for an LXMessage state integer."""
+    return _LXMF_STATE_NAMES.get(state, "unknown")
+
+
 # ── Reticulum / LXMF setup ─────────────────────────────────────────────────
 lxmf_router: Optional[LXMF.LXMRouter] = None
 local_destination: Optional[RNS.Destination] = (
@@ -552,10 +575,7 @@ async def api_send_message(payload: dict):
     )
 
     def delivery_status_callback(msg):
-        # LXMessage states: STATE_SENT, STATE_DELIVERED, STATE_FAILED
-        status = (
-            "delivered" if msg.state == LXMF.LXMessage.STATE_DELIVERED else "failed"
-        )
+        status = lxmf_status_name(msg.state)
         with get_db() as db:
             db.execute("UPDATE messages SET status=? WHERE id=?", (status, msg_id))
             db.commit()
@@ -568,9 +588,25 @@ async def api_send_message(payload: dict):
         )
 
     lxmf_message.register_delivery_callback(delivery_status_callback)
+    # LXMF also exposes a failed-callback on some versions; register if present.
+    failed_register = getattr(lxmf_message, "register_failed_callback", None)
+    if callable(failed_register):
+        failed_register(delivery_status_callback)
+
     lxmf_router.handle_outbound(lxmf_message)
 
-    return {"id": msg_id, "status": "queued", "ts": ts}
+    # Hand-off to LXMRouter was successful; move out of 'queued' so the
+    # retry worker (wt1.1) doesn't pick this row up.
+    with get_db() as db:
+        db.execute(
+            "UPDATE messages SET status=? WHERE id=?", ("outbound", msg_id)
+        )
+        db.commit()
+    await manager.broadcast(
+        {"type": "status_update", "msg_id": msg_id, "status": "outbound"}
+    )
+
+    return {"id": msg_id, "status": "outbound", "ts": ts}
 
 
 # ── WebSocket ────────────────────────────────────────────────────────────────
