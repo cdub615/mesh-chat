@@ -1,0 +1,9 @@
+.claude/commands/deploy-node1.md
+.claude/commands/deploy-node2.md
+.claude/settings.local.json
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
