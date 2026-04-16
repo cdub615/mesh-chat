@@ -616,10 +616,16 @@ def _try_submit_outbound(msg_id: int, to_hash: str, body: str) -> bool:
         "lxmf",
         "delivery",
     )
+    # title and fields are reserved for future use (subject lines, reactions,
+    # custom metadata). Passing them explicitly so the LXMF constructor
+    # call is self-documenting and a future feature can wire them through
+    # without touching the signature.
     lxmf_message = LXMF.LXMessage(
         rns_dest,
         local_destination,
         body,
+        title="",
+        fields={},
         desired_method=LXMF.LXMessage.DIRECT,
     )
 
