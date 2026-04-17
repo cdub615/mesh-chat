@@ -1,3 +1,5 @@
+.beads.bak/
+
 .claude/commands/deploy-node1.md
 .claude/commands/deploy-node2.md
 .claude/settings.local.json
