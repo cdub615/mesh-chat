@@ -32,18 +32,49 @@ from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconn
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Literal
 
-# ── Config ─────────────────────────────────────────────────────────────────
+# ── Settings ────────────────────────────────────────────────────────────────
+# Everything below is overridable via MESHCHAT_* environment variables or
+# a .env file at the project root. The module-level BASE_DIR / DATA_DIR /
+# PORT / etc. constants below are aliases for Settings fields so the rest
+# of the module keeps its existing constant references — ops configure via
+# env, code reads the familiar names.
+class Settings(BaseSettings):
+    # Network
+    host: str = "0.0.0.0"
+    port: int = 8080
+    # Filesystem
+    data_dir: Path = Path.home() / ".meshchat"
+    static_dir: Path = Path(__file__).parent / "static"
+    # Protocol / scheduler tunables
+    peer_reply_cooldown: float = 3600.0
+    peer_reply_memory: float = 86400.0
+    rns_retry_interval: float = 30.0
+    queued_retry_delays: tuple = (5.0, 15.0, 45.0, 120.0, 300.0, 600.0)
+    queued_retry_tick: float = 5.0
+    dest_cache_ttl: float = 3600.0
+    interfaces_broadcast_interval: float = 10.0
+    ws_ping_interval: float = 30.0
+
+    model_config = SettingsConfigDict(
+        env_prefix="MESHCHAT_", env_file=".env", extra="ignore"
+    )
+
+
+settings = Settings()
+settings.data_dir.mkdir(parents=True, exist_ok=True)
+
+# Compatibility aliases. Keep the existing module-level names; every call
+# site already uses these, and they just happen to now be driven by env.
 BASE_DIR = Path(__file__).parent
-STATIC_DIR = BASE_DIR / "static"  # put index.html / manifest / sw.js here
-DATA_DIR = Path.home() / ".meshchat"
+STATIC_DIR = settings.static_dir
+DATA_DIR = settings.data_dir
 DB_PATH = DATA_DIR / "messages.db"
 IDENTITY_PATH = DATA_DIR / "identity"
 CONFIG_PATH = DATA_DIR / "config.json"
-PORT = 8080
-
-DATA_DIR.mkdir(parents=True, exist_ok=True)
+PORT = settings.port
 
 
 # ── Logging ────────────────────────────────────────────────────────────────
@@ -396,7 +427,7 @@ DEFAULT_METHOD = "opportunistic"
 # is pure overhead when the same peer is messaged repeatedly. Entries are
 # dropped if the path is lost (has_path returns false) or the TTL expires.
 _dest_cache: dict = {}  # hex_hash -> (RNS.Destination, expires_at)
-DEST_CACHE_TTL = 3600.0
+DEST_CACHE_TTL = settings.dest_cache_ttl
 
 
 def _get_cached_destination(hex_key: str, dest_hash: bytes):
@@ -424,8 +455,8 @@ main_loop: Optional[asyncio.AbstractEventLoop] = None
 # Per-peer auto-reply throttle: we reply to a peer's announce at most once
 # per PEER_REPLY_COOLDOWN so a 3+ node mesh can't chain-flood announce
 # replies. Entries older than PEER_REPLY_MEMORY are pruned to bound memory.
-PEER_REPLY_COOLDOWN = 3600.0
-PEER_REPLY_MEMORY = 86400.0
+PEER_REPLY_COOLDOWN = settings.peer_reply_cooldown
+PEER_REPLY_MEMORY = settings.peer_reply_memory
 _peer_last_reply_ts: dict = {}  # dest_hash_hex -> last time we auto-replied
 
 # Startup state for Reticulum/LXMF. If init fails (e.g. RNode unplugged,
@@ -433,13 +464,13 @@ _peer_last_reply_ts: dict = {}  # dest_hash_hex -> last time we auto-replied
 # and a background task retries every RNS_RETRY_INTERVAL seconds.
 rns_ready: bool = False
 rns_error: Optional[str] = None
-RNS_RETRY_INTERVAL = 30.0
+RNS_RETRY_INTERVAL = settings.rns_retry_interval
 
 # Outbound retry schedule for messages whose destination path isn't yet
 # known. Index = attempt count that just failed; value = seconds until the
 # next retry. After QUEUED_RETRY_DELAYS is exhausted the row flips to failed.
-QUEUED_RETRY_DELAYS: list = [5.0, 15.0, 45.0, 120.0, 300.0, 600.0]
-QUEUED_RETRY_TICK = 5.0
+QUEUED_RETRY_DELAYS: list = list(settings.queued_retry_delays)
+QUEUED_RETRY_TICK = settings.queued_retry_tick
 
 
 def send_announce(reason: str):
@@ -998,12 +1029,12 @@ async def api_interfaces():
     return _snapshot_interfaces()
 
 
-INTERFACES_BROADCAST_INTERVAL = 10.0
+INTERFACES_BROADCAST_INTERVAL = settings.interfaces_broadcast_interval
 
 # WebSocket idle timeout; if no client message arrives within this window,
 # we send a server ping to keep the connection alive and to detect dead
 # sockets (a failed send then tears it down).
-WS_PING_INTERVAL = 30.0
+WS_PING_INTERVAL = settings.ws_ping_interval
 
 
 async def _interfaces_broadcast_loop():
@@ -1298,8 +1329,8 @@ else:
 if __name__ == "__main__":
     uvicorn.run(
         "meshchat_server:app",
-        host="0.0.0.0",
-        port=PORT,
+        host=settings.host,
+        port=settings.port,
         log_level="info",
         reload=False,
     )
