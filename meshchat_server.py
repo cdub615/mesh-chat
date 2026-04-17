@@ -232,6 +232,29 @@ LXMF_METHOD_BY_NAME: dict = {
 DEFAULT_METHOD = "opportunistic"
 
 
+# Cache RNS.Destination instances by hex recipient hash. Building a fresh
+# Destination (identity + category + type + app + aspect) per outbound send
+# is pure overhead when the same peer is messaged repeatedly. Entries are
+# dropped if the path is lost (has_path returns false) or the TTL expires.
+_dest_cache: dict = {}  # hex_hash -> (RNS.Destination, expires_at)
+DEST_CACHE_TTL = 3600.0
+
+
+def _get_cached_destination(hex_key: str, dest_hash: bytes):
+    entry = _dest_cache.get(hex_key)
+    if entry is None:
+        return None
+    dest, expires_at = entry
+    if expires_at <= time.time() or not RNS.Transport.has_path(dest_hash):
+        _dest_cache.pop(hex_key, None)
+        return None
+    return dest
+
+
+def _cache_destination(hex_key: str, dest) -> None:
+    _dest_cache[hex_key] = (dest, time.time() + DEST_CACHE_TTL)
+
+
 # ── Reticulum / LXMF setup ─────────────────────────────────────────────────
 lxmf_router: Optional[LXMF.LXMRouter] = None
 local_destination: Optional[RNS.Destination] = (
@@ -617,25 +640,27 @@ def _try_submit_outbound(
         )
         return False
 
-    if not RNS.Transport.has_path(dest_hash):
-        RNS.Transport.request_path(dest_hash)
-
-    recipient_identity = RNS.Identity.recall(dest_hash)
-    if recipient_identity is None:
-        return False
+    hex_key = dest_hash.hex()
+    rns_dest = _get_cached_destination(hex_key, dest_hash)
+    if rns_dest is None:
+        if not RNS.Transport.has_path(dest_hash):
+            RNS.Transport.request_path(dest_hash)
+        recipient_identity = RNS.Identity.recall(dest_hash)
+        if recipient_identity is None:
+            return False
+        rns_dest = RNS.Destination(
+            recipient_identity,
+            RNS.Destination.OUT,
+            RNS.Destination.SINGLE,
+            "lxmf",
+            "delivery",
+        )
+        _cache_destination(hex_key, rns_dest)
 
     # Unknown method strings fall back to the default — validation happened
     # at the API boundary; this is belt-and-suspenders for rows re-read from
     # an older schema that predates the method column.
     desired_method = LXMF_METHOD_BY_NAME.get(method, LXMF_METHOD_BY_NAME[DEFAULT_METHOD])
-
-    rns_dest = RNS.Destination(
-        recipient_identity,
-        RNS.Destination.OUT,
-        RNS.Destination.SINGLE,
-        "lxmf",
-        "delivery",
-    )
     # title and fields are reserved for future use (subject lines, reactions,
     # custom metadata). Passing them explicitly so the LXMF constructor
     # call is self-documenting and a future feature can wire them through
