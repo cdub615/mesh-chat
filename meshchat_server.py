@@ -153,6 +153,7 @@ def init_db():
         _add_column_if_missing(db, "messages", "lxmf_hash", "TEXT")
         _add_column_if_missing(db, "messages", "attempts", "INTEGER DEFAULT 0")
         _add_column_if_missing(db, "messages", "next_retry_at", "REAL")
+        _add_column_if_missing(db, "messages", "method", "TEXT DEFAULT 'opportunistic'")
         db.execute("CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_messages_to_hash ON messages(to_hash)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_messages_from_hash ON messages(from_hash)")
@@ -217,6 +218,18 @@ _LXMF_STATE_NAMES: dict = _build_lxmf_state_map()
 def lxmf_status_name(state) -> str:
     """Return a canonical lowercase status for an LXMessage state integer."""
     return _LXMF_STATE_NAMES.get(state, "unknown")
+
+
+# Caller-facing delivery method strings -> LXMF.LXMessage desired_method
+# constants. OPPORTUNISTIC is the default because it's best-effort single
+# packet — more robust on LoRa than DIRECT (which requires a live Link) and
+# lighter than PROPAGATED (which requires a propagation node).
+LXMF_METHOD_BY_NAME: dict = {
+    "direct": LXMF.LXMessage.DIRECT,
+    "opportunistic": LXMF.LXMessage.OPPORTUNISTIC,
+    "propagated": LXMF.LXMessage.PROPAGATED,
+}
+DEFAULT_METHOD = "opportunistic"
 
 
 # ── Reticulum / LXMF setup ─────────────────────────────────────────────────
@@ -583,7 +596,9 @@ def _make_delivery_status_callback(msg_id: int):
     return cb
 
 
-def _try_submit_outbound(msg_id: int, to_hash: str, body: str) -> bool:
+def _try_submit_outbound(
+    msg_id: int, to_hash: str, body: str, method: str = DEFAULT_METHOD
+) -> bool:
     """Attempt to resolve the destination path and hand the message to LXMF.
 
     Returns True if LXMRouter accepted it, False if the path is still unknown
@@ -609,6 +624,11 @@ def _try_submit_outbound(msg_id: int, to_hash: str, body: str) -> bool:
     if recipient_identity is None:
         return False
 
+    # Unknown method strings fall back to the default — validation happened
+    # at the API boundary; this is belt-and-suspenders for rows re-read from
+    # an older schema that predates the method column.
+    desired_method = LXMF_METHOD_BY_NAME.get(method, LXMF_METHOD_BY_NAME[DEFAULT_METHOD])
+
     rns_dest = RNS.Destination(
         recipient_identity,
         RNS.Destination.OUT,
@@ -626,7 +646,7 @@ def _try_submit_outbound(msg_id: int, to_hash: str, body: str) -> bool:
         body,
         title="",
         fields={},
-        desired_method=LXMF.LXMessage.DIRECT,
+        desired_method=desired_method,
     )
 
     cb = _make_delivery_status_callback(msg_id)
@@ -682,15 +702,17 @@ async def _queued_retry_loop():
             now = time.time()
             with get_db() as db:
                 rows = db.execute(
-                    "SELECT id, to_hash, body, COALESCE(attempts, 0) AS attempts "
+                    "SELECT id, to_hash, body, "
+                    "       COALESCE(attempts, 0) AS attempts, "
+                    "       COALESCE(method, ?) AS method "
                     "FROM messages "
                     "WHERE status = 'queued' "
                     "  AND (next_retry_at IS NULL OR next_retry_at <= ?)",
-                    (now,),
+                    (DEFAULT_METHOD, now),
                 ).fetchall()
             for r in rows:
                 msg_id = r["id"]
-                ok = _try_submit_outbound(msg_id, r["to_hash"], r["body"])
+                ok = _try_submit_outbound(msg_id, r["to_hash"], r["body"], r["method"])
                 if ok:
                     _mark_outbound(msg_id)
                     await manager.broadcast(
@@ -718,9 +740,19 @@ async def api_send_message(payload: dict):
 
     to_hash = payload.get("to", "").strip()
     body = payload.get("body", "").strip()
+    method = (payload.get("method") or DEFAULT_METHOD).strip().lower()
 
     if not to_hash or not body:
         return JSONResponse({"error": "missing 'to' or 'body'"}, status_code=400)
+
+    if method not in LXMF_METHOD_BY_NAME:
+        return JSONResponse(
+            {
+                "error": f"invalid method {method!r}; "
+                         f"must be one of {sorted(LXMF_METHOD_BY_NAME)}"
+            },
+            status_code=400,
+        )
 
     try:
         normalize_hash(to_hash)
@@ -738,27 +770,28 @@ async def api_send_message(payload: dict):
     with get_db() as db:
         cursor = db.execute(
             "INSERT INTO messages "
-            "(ts, direction, to_hash, body, status, attempts, next_retry_at) "
-            "VALUES (?,?,?,?,?,?,?)",
-            (ts, "out", to_hash, body, "queued", 0, 0.0),
+            "(ts, direction, to_hash, body, status, attempts, next_retry_at, method) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (ts, "out", to_hash, body, "queued", 0, 0.0, method),
         )
         msg_id = cursor.lastrowid
         db.commit()
 
     # First-shot synchronous attempt — if the path is already cached, the
     # message is in LXMF's hands before the HTTP response returns.
-    if _try_submit_outbound(msg_id, to_hash, body):
+    if _try_submit_outbound(msg_id, to_hash, body, method):
         _mark_outbound(msg_id)
         await manager.broadcast(
             {"type": "status_update", "msg_id": msg_id, "status": "outbound"}
         )
-        return {"id": msg_id, "status": "outbound", "ts": ts}
+        return {"id": msg_id, "status": "outbound", "ts": ts, "method": method}
 
     # Path unknown; caller gets 202 and the retry worker will try again.
     return JSONResponse(
         {
             "id": msg_id,
             "status": "path_requested",
+            "method": method,
             "detail": "destination path unknown, request sent — will retry automatically",
         },
         status_code=202,
