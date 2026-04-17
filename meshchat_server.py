@@ -31,6 +31,8 @@ import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field, field_validator
+from typing import Literal
 
 # ── Config ─────────────────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).parent
@@ -147,6 +149,75 @@ def normalize_hash(s: str) -> bytes:
             f"destination hash must be 32 hex characters (got {len(cleaned)}): {s!r}"
         )
     return bytes.fromhex(cleaned)
+
+
+# ── API models ─────────────────────────────────────────────────────────────
+# Pydantic request/response models give us 422 validation, OpenAPI schemas
+# in /docs, and a single source of truth for the wire format. The string
+# validators reuse normalize_hash so 'valid Reticulum hash' is defined in
+# one place regardless of surface (API, internal, or retry worker).
+
+def _hash_validator(v: str) -> str:
+    """Pydantic field validator: reject anything normalize_hash rejects, but
+    pass through the original string so the stored form matches what the
+    client sent (prettyhexrep decorations preserved)."""
+    if not isinstance(v, str):
+        raise ValueError("hash must be a string")
+    normalize_hash(v)  # raises ValueError on bad length / non-hex
+    return v
+
+
+MethodName = Literal["direct", "opportunistic", "propagated"]
+
+
+class DisplayNameIn(BaseModel):
+    display_name: str = Field(..., min_length=1, max_length=32)
+
+
+class WifiSsidIn(BaseModel):
+    wifi_ssid: str = Field(..., min_length=1, max_length=32)
+
+
+class SendMessageIn(BaseModel):
+    to: str = Field(..., description="Recipient destination hash (32 hex chars)")
+    body: str = Field(..., min_length=1)
+    method: MethodName = "opportunistic"
+
+    @field_validator("to")
+    @classmethod
+    def _validate_to(cls, v: str) -> str:
+        return _hash_validator(v)
+
+    @field_validator("body")
+    @classmethod
+    def _strip_body(cls, v: str) -> str:
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("body cannot be whitespace only")
+        return stripped
+
+
+class PropagationNodesIn(BaseModel):
+    """Either role is optional. Omitted = leave untouched; explicit null or
+    empty string = clear that role."""
+    outbound: Optional[str] = None
+    inbound: Optional[str] = None
+
+    @field_validator("outbound", "inbound")
+    @classmethod
+    def _validate_optional_hash(cls, v):
+        if v in (None, ""):
+            return v
+        return _hash_validator(v)
+
+
+class PropagationNodesOut(BaseModel):
+    outbound: Optional[str] = None
+    inbound: Optional[str] = None
+
+
+class AnnounceOut(BaseModel):
+    status: Literal["announced"] = "announced"
 
 
 # ── Database ────────────────────────────────────────────────────────────────
@@ -758,12 +829,8 @@ def api_identity():
 
 
 @app.put("/api/display_name")
-async def api_set_display_name(payload: dict):
-    name = (payload or {}).get("display_name", "").strip()
-    if not name:
-        return JSONResponse({"error": "display_name is required"}, status_code=400)
-    if len(name) > 32:
-        return JSONResponse({"error": "display_name too long (max 32)"}, status_code=400)
+async def api_set_display_name(payload: DisplayNameIn):
+    name = payload.display_name.strip()
     update_config(display_name=name)
     if local_destination is not None:
         local_destination.display_name = name
@@ -771,49 +838,38 @@ async def api_set_display_name(payload: dict):
 
 
 @app.put("/api/wifi_ssid")
-async def api_set_wifi_ssid(payload: dict):
-    ssid = (payload or {}).get("wifi_ssid", "").strip()
-    if not ssid:
-        return JSONResponse({"error": "wifi_ssid is required"}, status_code=400)
-    if len(ssid) > 32:
-        return JSONResponse({"error": "wifi_ssid too long (max 32)"}, status_code=400)
+async def api_set_wifi_ssid(payload: WifiSsidIn):
+    ssid = payload.wifi_ssid.strip()
     update_config(wifi_ssid=ssid)
     return {"wifi_ssid": ssid}
 
 
-@app.get("/api/propagation_nodes")
+@app.get("/api/propagation_nodes", response_model=PropagationNodesOut)
 def api_get_propagation_nodes():
     return get_propagation_nodes()
 
 
-@app.put("/api/propagation_nodes")
-async def api_set_propagation_nodes(payload: dict):
-    """Accept {outbound?: <hex>|null, inbound?: <hex>|null}.
+@app.put("/api/propagation_nodes", response_model=PropagationNodesOut)
+async def api_set_propagation_nodes(payload: PropagationNodesIn):
+    """Set or clear outbound/inbound propagation nodes.
 
-    Passing null or empty string for a role clears it. Unspecified roles
-    are left untouched. Invalid hashes are rejected with 400 and no
-    config write.
+    Semantics:
+    - Omitting a role key = leave it untouched.
+    - Explicit null or empty string = clear that role.
+    - Invalid hash = 422 (Pydantic validator).
+
+    We key off payload.model_fields_set to distinguish 'omitted' from
+    'explicitly null', which is what Pydantic gives us for free.
     """
-    payload = payload or {}
+    set_fields = payload.model_fields_set
     updates: dict = {}
     for role in ("outbound", "inbound"):
-        if role not in payload:
+        if role not in set_fields:
             continue
-        val = payload[role]
-        if val in (None, ""):
-            updates[f"{role}_propagation_node"] = None
-            continue
-        if not isinstance(val, str):
-            return JSONResponse(
-                {"error": f"{role} must be a hex string or null"}, status_code=400
-            )
-        try:
-            normalize_hash(val)
-        except ValueError as e:
-            return JSONResponse(
-                {"error": f"invalid {role} hash: {e}"}, status_code=400
-            )
-        updates[f"{role}_propagation_node"] = val.strip()
+        val = getattr(payload, role)
+        updates[f"{role}_propagation_node"] = (
+            None if val in (None, "") else val.strip()
+        )
     if updates:
         update_config(**updates)
         if lxmf_router is not None:
@@ -1127,34 +1183,17 @@ async def _queued_retry_loop():
 
 
 @app.post("/api/messages", dependencies=[Depends(require_rns_ready)])
-async def api_send_message(payload: dict):
+async def api_send_message(payload: SendMessageIn):
+    """Queue an outbound LXMF message.
+
+    Pydantic validates `to` (32-hex via normalize_hash), `body` (non-empty),
+    and `method` (Literal enum). Returns 200 {status: outbound} if the path
+    resolves synchronously, or 202 {status: path_requested} if the retry
+    worker will take over.
     """
-    Body: { "to": "<hex hash>", "body": "<text>" }
-    """
-    to_hash = payload.get("to", "").strip()
-    body = payload.get("body", "").strip()
-    method = (payload.get("method") or DEFAULT_METHOD).strip().lower()
-
-    if not to_hash or not body:
-        return JSONResponse({"error": "missing 'to' or 'body'"}, status_code=400)
-
-    if method not in LXMF_METHOD_BY_NAME:
-        return JSONResponse(
-            {
-                "error": f"invalid method {method!r}; "
-                         f"must be one of {sorted(LXMF_METHOD_BY_NAME)}"
-            },
-            status_code=400,
-        )
-
-    try:
-        normalize_hash(to_hash)
-    except ValueError:
-        RNS.log(
-            f"[MeshChat] /api/messages rejected: invalid dest hash {to_hash!r}",
-            RNS.LOG_ERROR,
-        )
-        return JSONResponse({"error": "invalid destination hash"}, status_code=400)
+    to_hash = payload.to.strip()
+    body = payload.body  # already stripped by the validator
+    method = payload.method
 
     ts = time.time()
 
