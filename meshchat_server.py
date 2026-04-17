@@ -809,7 +809,7 @@ def require_rns_ready() -> None:
 
 
 @app.get("/api/identity")
-def api_identity():
+async def api_identity():
     if not rns_ready or local_destination is None:
         return JSONResponse(
             {
@@ -845,7 +845,7 @@ async def api_set_wifi_ssid(payload: WifiSsidIn):
 
 
 @app.get("/api/propagation_nodes", response_model=PropagationNodesOut)
-def api_get_propagation_nodes():
+async def api_get_propagation_nodes():
     return get_propagation_nodes()
 
 
@@ -878,7 +878,7 @@ async def api_set_propagation_nodes(payload: PropagationNodesIn):
 
 
 @app.post("/api/announce", dependencies=[Depends(require_rns_ready)])
-def api_announce():
+async def api_announce():
     RNS.log(
         f"[MeshChat] /api/announce triggered from "
         f"{RNS.prettyhexrep(local_destination.hash)}"
@@ -929,8 +929,8 @@ def _path_metrics(dest_hash: bytes) -> dict:
     return metrics
 
 
-@app.get("/api/peers")
-def api_peers():
+def _db_list_peers() -> list:
+    """Blocking: fetch peers with path metrics. Runs in the default executor."""
     with get_db() as db:
         rows = db.execute(
             "SELECT hash, display_name, first_seen, last_seen FROM peers ORDER BY last_seen DESC"
@@ -954,6 +954,11 @@ def api_peers():
             })
         peers.append(peer)
     return peers
+
+
+@app.get("/api/peers")
+async def api_peers():
+    return await asyncio.get_running_loop().run_in_executor(None, _db_list_peers)
 
 
 def _serialize_interface(iface) -> dict:
@@ -989,7 +994,7 @@ def _snapshot_interfaces() -> list:
 
 
 @app.get("/api/interfaces")
-def api_interfaces():
+async def api_interfaces():
     return _snapshot_interfaces()
 
 
@@ -1018,16 +1023,21 @@ async def _interfaces_broadcast_loop():
             RNS.log(f"[MeshChat] interfaces broadcast error: {e}", RNS.LOG_ERROR)
 
 
-@app.delete("/api/peers/{peer_hash}")
-def api_delete_peer(peer_hash: str):
+def _db_delete_peer(peer_hash: str) -> None:
     with get_db() as db:
         db.execute("DELETE FROM peers WHERE hash = ?", (peer_hash,))
         db.commit()
+
+
+@app.delete("/api/peers/{peer_hash}")
+async def api_delete_peer(peer_hash: str):
+    await asyncio.get_running_loop().run_in_executor(
+        None, _db_delete_peer, peer_hash
+    )
     return {"status": "removed"}
 
 
-@app.get("/api/messages")
-def api_get_messages(limit: int = 100):
+def _db_list_messages(limit: int) -> list:
     with get_db() as db:
         rows = db.execute(
             "SELECT * FROM messages ORDER BY ts DESC LIMIT ?", (limit,)
@@ -1036,6 +1046,13 @@ def api_get_messages(limit: int = 100):
     for m in messages:
         m["time"] = datetime.fromtimestamp(m["ts"], tz=timezone.utc).strftime("%H:%M")
     return messages
+
+
+@app.get("/api/messages")
+async def api_get_messages(limit: int = 100):
+    return await asyncio.get_running_loop().run_in_executor(
+        None, _db_list_messages, limit
+    )
 
 
 def _make_delivery_status_callback(msg_id: int):
