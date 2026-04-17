@@ -169,47 +169,83 @@ def _add_column_if_missing(db, table: str, column: str, decl: str) -> None:
         db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
 
+# ── Schema migrations ──────────────────────────────────────────────────────
+# Each migration function is applied in order. PRAGMA user_version tracks
+# the highest migration that has been applied on the current DB. To add a
+# new migration: append a function to MIGRATIONS — the runner will pick it
+# up on next startup. Every migration must be idempotent (safe to re-run
+# against a DB that's already at that version) so partial failures are
+# recoverable.
+
+def _migration_1_initial_schema(db) -> None:
+    """Baseline messages + peers tables, plus the columns and indexes that
+    existed before schema versioning was introduced. Idempotent via
+    CREATE TABLE IF NOT EXISTS, _add_column_if_missing, and
+    CREATE INDEX IF NOT EXISTS — so pre-versioning DBs get adopted at
+    v1 with no data migration needed."""
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS messages (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts        REAL    NOT NULL,
+            direction TEXT    NOT NULL,  -- 'in' | 'out'
+            from_hash TEXT,
+            to_hash   TEXT,
+            body      TEXT    NOT NULL,
+            status    TEXT    DEFAULT 'sent'
+        )
+    """)
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS peers (
+            hash         TEXT PRIMARY KEY,
+            display_name TEXT,
+            first_seen   REAL NOT NULL,
+            last_seen    REAL NOT NULL
+        )
+    """)
+    # SQLite can't add a UNIQUE column via ALTER, so uniqueness is enforced
+    # by the partial index below (outbound rows have NULL lxmf_hash).
+    _add_column_if_missing(db, "messages", "lxmf_hash", "TEXT")
+    _add_column_if_missing(db, "messages", "attempts", "INTEGER DEFAULT 0")
+    _add_column_if_missing(db, "messages", "next_retry_at", "REAL")
+    _add_column_if_missing(db, "messages", "method", "TEXT DEFAULT 'opportunistic'")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_messages_to_hash ON messages(to_hash)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_messages_from_hash ON messages(from_hash)")
+    db.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_lxmf_hash "
+        "ON messages(lxmf_hash) WHERE lxmf_hash IS NOT NULL"
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_messages_queued "
+        "ON messages(status, next_retry_at) WHERE status = 'queued'"
+    )
+
+
+MIGRATIONS: list = [_migration_1_initial_schema]
+SCHEMA_VERSION: int = len(MIGRATIONS)
+
+
+def _run_migrations(db) -> int:
+    """Advance PRAGMA user_version by running each pending migration in
+    order. Returns the number of migrations applied this run."""
+    current = db.execute("PRAGMA user_version").fetchone()[0]
+    applied = 0
+    for i, fn in enumerate(MIGRATIONS, start=1):
+        if current < i:
+            logger.info("Applying schema migration %d: %s", i, fn.__name__)
+            fn(db)
+            # PRAGMA user_version can't be parameterised — i is an int we
+            # control here so the f-string is safe.
+            db.execute(f"PRAGMA user_version = {i}")
+            applied += 1
+    return applied
+
+
 def init_db():
     with get_db() as db:
         db.execute("PRAGMA journal_mode=WAL")
         db.execute("PRAGMA synchronous=NORMAL")
-        db.execute("""
-            CREATE TABLE IF NOT EXISTS messages (
-                id        INTEGER PRIMARY KEY AUTOINCREMENT,
-                ts        REAL    NOT NULL,
-                direction TEXT    NOT NULL,  -- 'in' | 'out'
-                from_hash TEXT,
-                to_hash   TEXT,
-                body      TEXT    NOT NULL,
-                status    TEXT    DEFAULT 'sent'
-            )
-        """)
-        db.execute("""
-            CREATE TABLE IF NOT EXISTS peers (
-                hash         TEXT PRIMARY KEY,
-                display_name TEXT,
-                first_seen   REAL NOT NULL,
-                last_seen    REAL NOT NULL
-            )
-        """)
-        # Schema additions (idempotent). SQLite can't add a UNIQUE column via
-        # ALTER, so enforce uniqueness with a partial index that ignores NULLs
-        # (outbound rows don't have an lxmf_hash).
-        _add_column_if_missing(db, "messages", "lxmf_hash", "TEXT")
-        _add_column_if_missing(db, "messages", "attempts", "INTEGER DEFAULT 0")
-        _add_column_if_missing(db, "messages", "next_retry_at", "REAL")
-        _add_column_if_missing(db, "messages", "method", "TEXT DEFAULT 'opportunistic'")
-        db.execute("CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts)")
-        db.execute("CREATE INDEX IF NOT EXISTS idx_messages_to_hash ON messages(to_hash)")
-        db.execute("CREATE INDEX IF NOT EXISTS idx_messages_from_hash ON messages(from_hash)")
-        db.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_lxmf_hash "
-            "ON messages(lxmf_hash) WHERE lxmf_hash IS NOT NULL"
-        )
-        db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_messages_queued "
-            "ON messages(status, next_retry_at) WHERE status = 'queued'"
-        )
+        _run_migrations(db)
         db.commit()
 
 
