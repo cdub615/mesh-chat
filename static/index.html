@@ -69,6 +69,17 @@
     @keyframes pulse-dot { 0%,100%{opacity:1} 50%{opacity:.4} }
 
     /* nav */
+    #conn-banner {
+      flex-shrink: 0; padding: 8px 16px;
+      font-family: var(--font-ui); font-size: 13px; font-weight: 500;
+      text-align: center; border-bottom: 1px solid var(--border);
+      transition: background .2s;
+    }
+    #conn-banner.hidden { display: none; }
+    #conn-banner.warn { background: var(--amber-dim); color: var(--amber); }
+    #conn-banner.error { background: rgba(220,38,38,0.15); color: #fca5a5; }
+    #conn-banner.ok { background: var(--accent-dim); color: var(--accent); }
+
     #nav {
       flex-shrink: 0; display: flex; align-items: center; gap: 2px;
       padding: 0 16px; background: var(--bg-surface); border-bottom: 1px solid var(--border);
@@ -366,6 +377,10 @@
     </div>
   </div>
 
+  <div id="conn-banner" class="hidden" role="status" aria-live="polite">
+    <span id="conn-banner-text"></span>
+  </div>
+
   <div id="nav">
     <button class="nav-tab active" data-tab="messages" onclick="switchTab('messages',this)">Messages<span id="messages-badge" class="tab-badge hidden">0</span></button>
     <button class="nav-tab" data-tab="contacts"        onclick="switchTab('contacts',this)">Nodes</button>
@@ -570,6 +585,29 @@ function renderBadges() {
   // Per-peer badges are injected into the Nodes list by renderNodes().
 }
 
+// Connection banner (cxa.7). The banner surfaces three states:
+//   ok    — briefly flashed on recovery
+//   warn  — WebSocket is reconnecting / identity polling
+//   error — /api/identity says ready:false with a specific reason
+function setConnBanner(level, text, autohide = false) {
+  const el = document.getElementById('conn-banner');
+  const txt = document.getElementById('conn-banner-text');
+  if (!level) {
+    el.classList.add('hidden');
+    return;
+  }
+  el.classList.remove('hidden', 'warn', 'error', 'ok');
+  el.classList.add(level);
+  txt.textContent = text;
+  if (autohide) {
+    setTimeout(() => {
+      // Only auto-hide if still showing the same message (don't swallow a
+      // newer banner set in the meantime).
+      if (txt.textContent === text) el.classList.add('hidden');
+    }, 2000);
+  }
+}
+
 function peerOfMsg(m) {
   // Return the "other party" in the conversation for grouping.
   return m.direction === 'out' ? m.to_hash : m.from_hash;
@@ -602,10 +640,23 @@ async function loadIdentity() {
     const r = await fetch(`${API}/api/identity`, { signal: ctrl.signal });
     clearTimeout(timer);
     if (!r.ok) {
-      // Server is reachable but Reticulum isn't ready yet (e.g. RNode
-      // unplugged at boot). Fall through to the offline overlay so the
-      // user gets a clear signal instead of a broken-looking UI.
-      throw new Error(`identity not ready (${r.status})`);
+      // Server is reachable but Reticulum isn't ready (degraded mode).
+      // /api/identity still returns a JSON body with ready:false + error.
+      // Surface that in the connection banner instead of the offline overlay
+      // — the overlay is for "server unreachable", this is "server up but
+      // mesh not ready".
+      let body = null;
+      try { body = await r.json(); } catch {}
+      const reason = body && body.error ? body.error : 'Reticulum not ready';
+      setConnBanner('error', `Node offline — ${reason}`);
+      document.getElementById('send-btn').disabled = true;
+      // Still populate whatever we can from the degraded body.
+      if (body) {
+        document.getElementById('display-name-val').textContent = body.display_name || '—';
+        document.getElementById('wifi-ssid-val').textContent = body.wifi_ssid || '—';
+        if (body.wifi_ssid) localStorage.setItem('meshchat_wifi_ssid', body.wifi_ssid);
+      }
+      return;
     }
     const d = await r.json();
     myHash = d.hash;
@@ -617,6 +668,12 @@ async function loadIdentity() {
     document.getElementById('iface-status').style.color   = 'var(--accent)';
     document.getElementById('send-btn').disabled = false;
     document.getElementById('offline-overlay').classList.add('hidden');
+    // Clear any lingering degraded-mode banner; flash 'Mesh ready' only
+    // if we were in a prior degraded state (banner was visible).
+    const banner = document.getElementById('conn-banner');
+    if (!banner.classList.contains('hidden')) {
+      setConnBanner('ok', 'Mesh ready', true);
+    }
     if (d.wifi_ssid) localStorage.setItem('meshchat_wifi_ssid', d.wifi_ssid);
     localStorage.setItem('meshchat_server_addr', window.location.host);
   } catch {
@@ -744,6 +801,12 @@ function connectWS() {
     wsLive = true;
     setStatus('live', 'live');
     stopPoll();
+    const banner = document.getElementById('conn-banner');
+    // Only flash 'Mesh ready' if we were reconnecting; don't show it on
+    // first-time connect because that would surprise the user on load.
+    if (banner.classList.contains('warn')) {
+      setConnBanner('ok', 'Mesh ready', true);
+    }
   };
 
   ws.onmessage = ({ data }) => {
@@ -780,6 +843,13 @@ function connectWS() {
   ws.onclose = () => {
     wsLive = false;
     setStatus('', 'offline');
+    // If identity is still reporting ready (server up, ws just blipped),
+    // show a reconnecting warn; the degraded-mode error banner takes
+    // precedence over this and won't be overwritten.
+    const banner = document.getElementById('conn-banner');
+    if (!banner.classList.contains('error')) {
+      setConnBanner('warn', 'Reconnecting to node…');
+    }
     startPoll();
     setTimeout(connectWS, 5000);
   };
