@@ -40,7 +40,7 @@ Any hardware supported by Reticulum should work — the Pi and Heltec combo is j
 ```bash
 python -m venv rns-venv
 source rns-venv/bin/activate
-pip install fastapi uvicorn websockets RNS LXMF
+pip install -r requirements.txt
 ```
 
 ### 2. Configure Reticulum
