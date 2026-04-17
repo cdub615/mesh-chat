@@ -91,6 +91,7 @@
       flex: 1; overflow-y: auto; padding: 16px;
       display: flex; flex-direction: column; gap: 4px; scroll-behavior: smooth;
     }
+    #msg-list.hidden { display: none; }
     #msg-list::-webkit-scrollbar { width: 0; }
     .date-sep {
       display: flex; align-items: center; gap: 10px;
@@ -124,6 +125,32 @@
     .skeleton.r { max-width: 78%; align-self: flex-end; }
     @keyframes shimmer { 0%,100%{opacity:.4} 50%{opacity:.9} }
 
+    /* conversation header + picker */
+    #conversation-header {
+      flex-shrink: 0; display: flex; align-items: center; justify-content: space-between;
+      gap: 12px; padding: 10px 16px; background: var(--bg-surface);
+      border-bottom: 1px solid var(--border);
+    }
+    #conversation-header.hidden { display: none; }
+    #conversation-header .conv-info { display: flex; align-items: baseline; gap: 8px; overflow: hidden; }
+    #conversation-header .conv-label { font-size: 11px; font-family: var(--font-mono); color: var(--text-muted); text-transform: uppercase; }
+    #conversation-header .conv-name { font-family: var(--font-ui); font-size: 15px; font-weight: 600; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #conversation-header .conv-hash { font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #conversation-header .conv-close {
+      font-family: var(--font-mono); font-size: 14px; color: var(--text-muted);
+      background: none; border: none; cursor: pointer; padding: 6px 10px;
+      border-radius: var(--radius-sm); transition: color .15s, background .15s;
+    }
+    #conversation-header .conv-close:hover { color: var(--text-primary); background: var(--bg-input); }
+
+    #no-conversation {
+      flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+      padding: 40px 24px; text-align: center; gap: 8px;
+    }
+    #no-conversation.hidden { display: none; }
+    #no-conversation .nc-title { font-family: var(--font-ui); font-size: 16px; font-weight: 600; color: var(--text-primary); }
+    #no-conversation .nc-sub { font-family: var(--font-ui); font-size: 14px; color: var(--text-secondary); max-width: 320px; line-height: 1.5; }
+
     /* compose */
     #compose {
       flex-shrink: 0; padding: 12px 16px;
@@ -135,6 +162,7 @@
       background: var(--bg-input); border: 1px solid var(--border);
       border-radius: var(--radius-sm); padding: 6px 10px; transition: border-color .15s;
     }
+    #dest-row.hidden { display: none; }
     #dest-row:focus-within { border-color: var(--border-hover); }
     #dest-label { font-size: 11px; font-weight: 600; color: var(--text-muted); font-family: var(--font-mono); white-space: nowrap; }
     #dest-input { flex: 1; background: none; border: none; outline: none; font-family: var(--font-mono); font-size: 16px; color: var(--text-primary); }
@@ -332,6 +360,18 @@
 
     <!-- Messages -->
     <div id="messages-view" class="view active">
+      <div id="conversation-header" class="hidden">
+        <div class="conv-info">
+          <span class="conv-label">with</span>
+          <span class="conv-name" id="conv-name">—</span>
+          <span class="conv-hash" id="conv-hash"></span>
+        </div>
+        <button class="conv-close" onclick="clearConversation()" aria-label="Close conversation">✕</button>
+      </div>
+      <div id="no-conversation" class="hidden">
+        <div class="nc-title">Pick a conversation</div>
+        <div class="nc-sub">Tap a node on the Nodes tab, or paste a destination hash below.</div>
+      </div>
       <div id="msg-list"><div id="msg-anchor"></div></div>
       <div id="compose">
         <div id="dest-row">
@@ -455,10 +495,30 @@ let peerPollTimer = null;
 let toastTimer  = null;
 let lastDate    = null;         // tracks date separator rendering
 
+// Per-peer threading (cxa.1)
+// activeConversation is the hash of the peer whose thread is currently in
+// view, or null if no conversation is selected. messageCache holds every
+// message the client has seen so we can re-filter on conversation change
+// without refetching.
+let activeConversation = null;
+let messageCache = [];
+const CONV_KEY = 'meshchat_active_conversation';
+
+function peerOfMsg(m) {
+  // Return the "other party" in the conversation for grouping.
+  return m.direction === 'out' ? m.to_hash : m.from_hash;
+}
+
+function belongsToActive(m) {
+  if (!activeConversation) return false;
+  return peerOfMsg(m) === activeConversation;
+}
+
 // ── Boot ────────────────────────────────────────────────────────────────────
 window.addEventListener('load', async () => {
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
   document.getElementById('ws-url-desc').textContent = WS;
+  activeConversation = localStorage.getItem(CONV_KEY) || null;
   showSkeletons();
   await loadIdentity();
   await loadMessages();
@@ -525,14 +585,62 @@ async function loadMessages() {
   clearSkeletons();
   try {
     const msgs = await fetch(`${API}/api/messages`).then(r => r.json());
-    if (!Array.isArray(msgs) || msgs.length === 0) { showEmptyState(); return; }
-    removeEmptyState();
-    lastDate = null;
-    for (const m of msgs) { maybeInsertDateSep(m.ts); paintMsg(m); rendered.add(m.id); }
-    scrollBottom();
+    if (!Array.isArray(msgs)) msgs = [];
+    // Keep the full set in memory; filtering happens in repaintConversation.
+    messageCache = msgs;
+    for (const m of msgs) rendered.add(m.id);
+    repaintConversation();
   } catch {
     paintSystemMsg('could not reach backend · is the server running?');
   }
+}
+
+function repaintConversation() {
+  const list = document.getElementById('msg-list');
+  const anchor = document.getElementById('msg-anchor');
+  const header = document.getElementById('conversation-header');
+  const picker = document.getElementById('no-conversation');
+  const compose = document.getElementById('compose');
+  const destRow = document.getElementById('dest-row');
+
+  // Clear list, keep the anchor.
+  Array.from(list.children).forEach(c => { if (c !== anchor) list.removeChild(c); });
+  lastDate = null;
+
+  if (!activeConversation) {
+    header.classList.add('hidden');
+    picker.classList.remove('hidden');
+    list.classList.add('hidden');
+    destRow.classList.remove('hidden');
+    compose.classList.remove('hidden');
+    removeEmptyState();
+    return;
+  }
+
+  // Populate header.
+  header.classList.remove('hidden');
+  picker.classList.add('hidden');
+  list.classList.remove('hidden');
+  const peerName = (nodes.get(activeConversation)?.name) ||
+                    (activeConversation === 'broadcast' ? 'All Nodes' : shortHash(activeConversation));
+  document.getElementById('conv-name').textContent = peerName;
+  document.getElementById('conv-hash').textContent =
+    activeConversation === 'broadcast' ? 'broadcast' : activeConversation;
+
+  // With a conversation active, hide the explicit dest row — we always
+  // send to activeConversation. Keep the compose visible.
+  destRow.classList.add('hidden');
+  compose.classList.remove('hidden');
+
+  // Filter + paint.
+  const rows = messageCache.filter(belongsToActive);
+  if (rows.length === 0) {
+    showEmptyState();
+    return;
+  }
+  removeEmptyState();
+  for (const m of rows) { maybeInsertDateSep(m.ts); paintMsg(m); }
+  scrollBottom();
 }
 
 // ── Poll fallback ─────────────────────────────────────────────────────────────
@@ -574,14 +682,22 @@ function connectWS() {
     try {
       const msg = JSON.parse(data);
       if (msg.type === 'message' && !rendered.has(msg.id)) {
-        removeEmptyState();
-        maybeInsertDateSep(Date.now() / 1000);
-        paintMsg({ id: msg.id, direction: 'in', from_hash: msg.from, body: msg.body, time: msg.time, status: 'delivered', ts: Date.now() / 1000 });
+        const record = {
+          id: msg.id, direction: 'in', from_hash: msg.from,
+          body: msg.body, time: msg.time, status: 'delivered',
+          ts: Date.now() / 1000,
+        };
+        messageCache.push(record);
         rendered.add(msg.id);
-        scrollBottom();
+        if (belongsToActive(record)) {
+          removeEmptyState();
+          maybeInsertDateSep(record.ts);
+          paintMsg(record);
+          scrollBottom();
+        }
         toast(`↓ ${shortHash(msg.from)}`);
         doVibrate();
-        updateNode(msg.from, { last_seen: 'just now' });
+        updateNode(msg.from, { last_seen_ts: Date.now() / 1000 });
       } else if (msg.type === 'status_update') {
         resolveById(msg.msg_id, msg.status);
       } else if (msg.type === 'peer_discovered') {
@@ -605,18 +721,34 @@ window.addEventListener('offline', () => showOfflineOverlay());
 
 // ── Send ─────────────────────────────────────────────────────────────────────
 async function sendMessage() {
-  const dest = document.getElementById('dest-input').value.trim();
+  // If a conversation is active, it supplies the destination; otherwise fall
+  // back to the manual dest-input (typical first-use / no-conversation state).
+  const dest = activeConversation
+    ? activeConversation
+    : document.getElementById('dest-input').value.trim();
   const body = document.getElementById('msg-input').value.trim();
   if (!body) return;
-  if (!dest) { toast('enter a destination'); return; }
+  if (!dest) { toast('pick a conversation or enter a destination'); return; }
+
+  // If there's no active conversation yet but a dest was entered, start
+  // the thread with this peer so subsequent messages are grouped.
+  if (!activeConversation && dest !== 'broadcast') {
+    selectConversation(dest);
+  }
 
   const tmpId = 'tmp-' + Date.now();
   const now   = new Date();
   const tStr  = pad(now.getHours()) + ':' + pad(now.getMinutes());
 
+  const optimistic = {
+    _tmpId: tmpId, direction: 'out', to_hash: dest, body,
+    time: tStr, status: 'sending', ts: now.getTime() / 1000,
+  };
+  messageCache.push(optimistic);
+
   removeEmptyState();
-  maybeInsertDateSep(now.getTime() / 1000);
-  const el = paintMsg({ _tmpId: tmpId, direction: 'out', to_hash: dest, body, time: tStr, status: 'sending', ts: now.getTime() / 1000 });
+  maybeInsertDateSep(optimistic.ts);
+  const el = paintMsg(optimistic);
   pending.set(tmpId, el);
 
   document.getElementById('msg-input').value = '';
@@ -636,7 +768,7 @@ async function sendMessage() {
       resolveOptimistic(tmpId, d.id, d.status || 'sent');
     } else {
       resolveOptimistic(tmpId, null, 'failed');
-      toast(d.error || 'send failed');
+      toast((d && (d.detail || d.error)) || 'send failed');
     }
   } catch {
     resolveOptimistic(tmpId, null, 'failed');
@@ -834,8 +966,29 @@ function timeAgo(ts) {
   return Math.floor(diff / 86400) + 'd ago';
 }
 
+function selectConversation(hash) {
+  activeConversation = hash;
+  if (hash) localStorage.setItem(CONV_KEY, hash);
+  else localStorage.removeItem(CONV_KEY);
+  // Keep dest-input in sync for the fallback no-conversation-active code path.
+  if (hash && hash !== 'broadcast') {
+    document.getElementById('dest-input').value = hash;
+  }
+  repaintConversation();
+}
+
+function clearConversation() {
+  selectConversation(null);
+  document.getElementById('dest-input').value = '';
+  switchTab('messages', document.querySelector('[data-tab=messages]'));
+}
+
 function selectDest(hash) {
-  document.getElementById('dest-input').value = hash;
+  selectConversation(hash);
+  switchTab('messages', document.querySelector('[data-tab=messages]'));
+  document.getElementById('msg-input').focus();
+  // Keep the old inline setter as a no-op fallback for any stray caller.
+  document.getElementById('dest-input').value = hash === 'broadcast' ? '' : hash;
   switchTab('messages', document.querySelector('[data-tab=messages]'));
   document.getElementById('msg-input').focus();
 }
