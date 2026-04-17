@@ -28,7 +28,7 @@ from typing import Optional
 import RNS
 import LXMF
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -673,6 +673,22 @@ async def _graceful_shutdown(tasks: list) -> None:
 
 app = FastAPI(lifespan=lifespan)
 
+
+def require_rns_ready() -> None:
+    """FastAPI dependency: raises 503 when RNS/LXMF aren't ready to serve.
+
+    /api/identity intentionally does NOT use this — it owns a custom 503
+    body shape that the frontend consumes to decide between 'offline'
+    and 'degraded' states. Every other endpoint that touches
+    lxmf_router or local_destination should depend on this guard.
+    """
+    if not rns_ready or local_destination is None or lxmf_router is None:
+        raise HTTPException(
+            status_code=503,
+            detail=rns_error or "Reticulum not ready",
+        )
+
+
 # ── REST API ────────────────────────────────────────────────────────────────
 
 
@@ -760,10 +776,8 @@ async def api_set_propagation_nodes(payload: dict):
     return get_propagation_nodes()
 
 
-@app.post("/api/announce")
+@app.post("/api/announce", dependencies=[Depends(require_rns_ready)])
 def api_announce():
-    if local_destination is None:
-        return JSONResponse({"error": "not ready"}, status_code=503)
     RNS.log(
         f"[MeshChat] /api/announce triggered from "
         f"{RNS.prettyhexrep(local_destination.hash)}"
@@ -1064,14 +1078,11 @@ async def _queued_retry_loop():
             RNS.log(f"[MeshChat] retry loop error: {e}", RNS.LOG_ERROR)
 
 
-@app.post("/api/messages")
+@app.post("/api/messages", dependencies=[Depends(require_rns_ready)])
 async def api_send_message(payload: dict):
     """
     Body: { "to": "<hex hash>", "body": "<text>" }
     """
-    if lxmf_router is None or local_destination is None:
-        return JSONResponse({"error": "RNS not ready"}, status_code=503)
-
     to_hash = payload.get("to", "").strip()
     body = payload.get("body", "").strip()
     method = (payload.get("method") or DEFAULT_METHOD).strip().lower()
