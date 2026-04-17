@@ -516,12 +516,13 @@ async def lifespan(app: FastAPI):
     if not start_reticulum():
         rns_retry_task = asyncio.create_task(_rns_retry_loop())
     queued_retry_task = asyncio.create_task(_queued_retry_loop())
+    interfaces_task = asyncio.create_task(_interfaces_broadcast_loop())
     try:
         yield
     finally:
-        queued_retry_task.cancel()
-        if rns_retry_task is not None and not rns_retry_task.done():
-            rns_retry_task.cancel()
+        for t in (queued_retry_task, interfaces_task, rns_retry_task):
+            if t is not None and not t.done():
+                t.cancel()
     # Reticulum / LXMF cleans up on process exit naturally
 
 
@@ -651,6 +652,62 @@ def api_peers():
             })
         peers.append(peer)
     return peers
+
+
+def _serialize_interface(iface) -> dict:
+    """Snapshot a Reticulum Interface for /api/interfaces.
+
+    Uses getattr with defaults because the Interface base class and each
+    subclass set different fields; e.g. AutoInterface has ifac_netname,
+    base Interface doesn't. Keys always appear in the response so the
+    frontend contract is stable across RNS versions.
+    """
+    return {
+        "name": getattr(iface, "name", None) or type(iface).__name__,
+        "type": type(iface).__name__,
+        "online": bool(getattr(iface, "online", False)),
+        "bitrate": getattr(iface, "bitrate", None),
+        "mtu": getattr(iface, "HW_MTU", None),
+        "rxb": getattr(iface, "rxb", 0),
+        "txb": getattr(iface, "txb", 0),
+        "created": getattr(iface, "created", None),
+        "can_receive": bool(getattr(iface, "IN", False)),
+        "can_transmit": bool(getattr(iface, "OUT", False)),
+        "ifac_netname": getattr(iface, "ifac_netname", None),
+    }
+
+
+def _snapshot_interfaces() -> list:
+    try:
+        interfaces = list(getattr(RNS.Transport, "interfaces", []) or [])
+    except Exception:
+        return []
+    return [_serialize_interface(i) for i in interfaces]
+
+
+@app.get("/api/interfaces")
+def api_interfaces():
+    return _snapshot_interfaces()
+
+
+INTERFACES_BROADCAST_INTERVAL = 10.0
+
+
+async def _interfaces_broadcast_loop():
+    """Push interface snapshots over WebSocket so the frontend can pulse
+    radio status without polling. Skips ticks when no one is connected."""
+    while True:
+        try:
+            await asyncio.sleep(INTERFACES_BROADCAST_INTERVAL)
+            if not manager.active:
+                continue
+            await manager.broadcast(
+                {"type": "interfaces", "interfaces": _snapshot_interfaces()}
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            RNS.log(f"[MeshChat] interfaces broadcast error: {e}", RNS.LOG_ERROR)
 
 
 @app.delete("/api/peers/{peer_hash}")
