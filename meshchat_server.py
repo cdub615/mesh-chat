@@ -262,9 +262,12 @@ local_destination: Optional[RNS.Destination] = (
 )
 main_loop: Optional[asyncio.AbstractEventLoop] = None
 
-# Rate-limit auto-reply announces so 2+ nodes don't echo each other forever.
-ANNOUNCE_REPLY_COOLDOWN = 20.0
-last_announce_ts: float = 0.0
+# Per-peer auto-reply throttle: we reply to a peer's announce at most once
+# per PEER_REPLY_COOLDOWN so a 3+ node mesh can't chain-flood announce
+# replies. Entries older than PEER_REPLY_MEMORY are pruned to bound memory.
+PEER_REPLY_COOLDOWN = 3600.0
+PEER_REPLY_MEMORY = 86400.0
+_peer_last_reply_ts: dict = {}  # dest_hash_hex -> last time we auto-replied
 
 # Startup state for Reticulum/LXMF. If init fails (e.g. RNode unplugged,
 # ~/.reticulum/config missing), we keep the HTTP server up in degraded mode
@@ -281,13 +284,31 @@ QUEUED_RETRY_TICK = 5.0
 
 
 def send_announce(reason: str):
-    """Broadcast our identity and record the timestamp for reply rate-limiting."""
-    global last_announce_ts
+    """Broadcast our identity."""
     if local_destination is None:
         return
     local_destination.announce(app_data=get_display_name().encode("utf-8"))
-    last_announce_ts = time.time()
     RNS.log(f"[MeshChat] Announce sent ({reason})")
+
+
+def _should_reply_to_peer(peer_hash_hex: str, now: float) -> bool:
+    """Return True iff we should auto-reply to this peer's announce.
+
+    Skip our own hash (paranoid guard against reflections), skip peers we
+    replied to within PEER_REPLY_COOLDOWN, and opportunistically prune
+    entries older than PEER_REPLY_MEMORY so the dict stays bounded.
+    """
+    if local_destination is not None:
+        if peer_hash_hex == RNS.prettyhexrep(local_destination.hash):
+            return False
+    # Prune while we're here.
+    stale_cutoff = now - PEER_REPLY_MEMORY
+    for k in [k for k, v in _peer_last_reply_ts.items() if v < stale_cutoff]:
+        _peer_last_reply_ts.pop(k, None)
+    last = _peer_last_reply_ts.get(peer_hash_hex)
+    if last is not None and (now - last) < PEER_REPLY_COOLDOWN:
+        return False
+    return True
 
 
 def _broadcast_from_thread(payload: dict):
@@ -352,15 +373,15 @@ class MeshChatAnnounceHandler:
             }
         )
 
-        # Auto-reply so the announcing node can discover us too, but rate-
-        # limited so a pair of nodes doesn't echo each other forever.
-        since_last = ts - last_announce_ts
-        if since_last > ANNOUNCE_REPLY_COOLDOWN:
+        # Auto-reply so the announcing node can discover us too. Per-peer
+        # cooldown prevents chain-floods on 3+ node meshes.
+        if _should_reply_to_peer(dest_hash_hex, ts):
             send_announce(f"reply to {dest_hash_hex}")
+            _peer_last_reply_ts[dest_hash_hex] = ts
         else:
             RNS.log(
-                f"[MeshChat] Skipping reply announce "
-                f"(last announce {since_last:.1f}s ago)"
+                f"[MeshChat] Skipping reply announce to {dest_hash_hex} "
+                f"(within per-peer cooldown or self-announce)"
             )
 
 
