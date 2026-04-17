@@ -234,7 +234,14 @@ class ConnectionManager:
         for ws in list(self.active):
             try:
                 await ws.send_text(json.dumps(data))
-            except Exception:
+            except Exception as e:
+                # Starlette/websockets raises a zoo of exception types on
+                # send to a closed connection — treat any send failure as
+                # evidence the connection is dead and prune it.
+                logger.debug(
+                    "Pruning dead WebSocket after %s: %s",
+                    type(e).__name__, e,
+                )
                 dead.append(ws)
         for ws in dead:
             self.active.discard(ws)
@@ -379,8 +386,11 @@ class MeshChatAnnounceHandler:
         if app_data:
             try:
                 display_name = app_data.decode("utf-8")
-            except Exception:
-                pass
+            except UnicodeDecodeError as e:
+                RNS.log(
+                    f"[MeshChat] received_announce: non-UTF8 app_data: {e}",
+                    RNS.LOG_WARNING,
+                )
 
         RNS.log(
             f"[MeshChat] received_announce: {dest_hash_hex} "
@@ -644,8 +654,11 @@ async def _graceful_shutdown(tasks: list) -> None:
     for ws in list(manager.active):
         try:
             await ws.close(code=1001)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(
+                "WebSocket close during shutdown failed with %s: %s",
+                type(e).__name__, e,
+            )
     manager.active.clear()
 
     # 3. Flush LXMF state so queued deliveries and peer tickets land on
@@ -654,10 +667,9 @@ async def _graceful_shutdown(tasks: list) -> None:
         try:
             lxmf_router.exit_handler()
         except Exception as e:
-            try:
-                RNS.log(f"[MeshChat] LXMF exit_handler failed: {e}", RNS.LOG_ERROR)
-            except Exception:
-                pass
+            # RNS.log itself can fail during shutdown (stdout already
+            # closed, RNS already torn down); fall through to logger.
+            logger.error("LXMF exit_handler failed: %s", e)
 
     # 4. Flush RNS state. Static on Reticulum in RNS 1.1.x.
     try:
@@ -665,10 +677,7 @@ async def _graceful_shutdown(tasks: list) -> None:
         if callable(rns_exit):
             rns_exit()
     except Exception as e:
-        try:
-            RNS.log(f"[MeshChat] RNS exit_handler failed: {e}", RNS.LOG_ERROR)
-        except Exception:
-            pass
+        logger.error("RNS exit_handler failed: %s", e)
 
 
 app = FastAPI(lifespan=lifespan)
@@ -807,8 +816,10 @@ def _path_metrics(dest_hash: bytes) -> dict:
             metrics["hops"] = hops
             # RNS 1.1.x uses hops as path cost; keep the field for forward-compat.
             metrics["path_cost"] = hops
-    except Exception:
-        pass
+    except Exception as e:
+        # RNS internals can raise a variety of lookup-time errors; fall
+        # back to null metrics rather than 500-ing the /api/peers response.
+        logger.debug("hops_to lookup failed for %s: %s: %s", dest_hash.hex(), type(e).__name__, e)
 
     # path_table read is best-effort; lock is held internally by RNS when
     # the table is written, but a dict.get on a tuple is atomic enough for
@@ -879,7 +890,8 @@ def _serialize_interface(iface) -> dict:
 def _snapshot_interfaces() -> list:
     try:
         interfaces = list(getattr(RNS.Transport, "interfaces", []) or [])
-    except Exception:
+    except Exception as e:
+        logger.debug("Interface enumeration failed: %s: %s", type(e).__name__, e)
         return []
     return [_serialize_interface(i) for i in interfaces]
 
