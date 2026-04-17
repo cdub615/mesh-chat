@@ -90,6 +90,15 @@ def get_wifi_ssid():
     return load_config().get("wifi_ssid", "")
 
 
+def get_propagation_nodes() -> dict:
+    """Return {outbound, inbound} propagation node hex hashes (or None each)."""
+    cfg = load_config()
+    return {
+        "outbound": cfg.get("outbound_propagation_node") or None,
+        "inbound": cfg.get("inbound_propagation_node") or None,
+    }
+
+
 def normalize_hash(s: str) -> bytes:
     """Strip prettyhexrep decorations (<, >, ., whitespace) and return raw bytes.
 
@@ -424,6 +433,46 @@ def lxmf_delivery_callback(message: LXMF.LXMessage):
     _broadcast_from_thread(payload)
 
 
+def _apply_propagation_nodes(router) -> None:
+    """Register configured outbound/inbound propagation nodes with LXMF.
+
+    Silently skips fields that aren't set or don't parse as valid hashes —
+    misconfiguration shouldn't block startup. Called from start_reticulum
+    (startup) and PUT /api/propagation_nodes (runtime update).
+    """
+    nodes = get_propagation_nodes()
+    for role, setter_name in (
+        ("outbound", "set_outbound_propagation_node"),
+        ("inbound", "set_inbound_propagation_node"),
+    ):
+        raw = nodes.get(role)
+        if not raw:
+            continue
+        try:
+            dest_hash = normalize_hash(raw)
+        except ValueError as e:
+            RNS.log(
+                f"[MeshChat] Ignoring malformed {role} propagation node {raw!r}: {e}",
+                RNS.LOG_WARNING,
+            )
+            continue
+        setter = getattr(router, setter_name, None)
+        if not callable(setter):
+            RNS.log(
+                f"[MeshChat] LXMRouter has no {setter_name}; skipping {role}",
+                RNS.LOG_WARNING,
+            )
+            continue
+        try:
+            setter(dest_hash)
+            RNS.log(f"[MeshChat] Configured {role} propagation node: {raw}")
+        except Exception as e:
+            RNS.log(
+                f"[MeshChat] Failed to set {role} propagation node {raw!r}: {e}",
+                RNS.LOG_ERROR,
+            )
+
+
 def start_reticulum() -> bool:
     """Initialize Reticulum + LXMF. Returns True on success, False on failure.
 
@@ -452,6 +501,8 @@ def start_reticulum() -> bool:
         lxmf_router.register_delivery_callback(lxmf_delivery_callback)
 
         RNS.Transport.register_announce_handler(MeshChatAnnounceHandler())
+
+        _apply_propagation_nodes(lxmf_router)
 
         RNS.log(
             f"[MeshChat] LXMF ready. Address: {RNS.prettyhexrep(local_destination.hash)}"
@@ -573,6 +624,46 @@ async def api_set_wifi_ssid(payload: dict):
         return JSONResponse({"error": "wifi_ssid too long (max 32)"}, status_code=400)
     update_config(wifi_ssid=ssid)
     return {"wifi_ssid": ssid}
+
+
+@app.get("/api/propagation_nodes")
+def api_get_propagation_nodes():
+    return get_propagation_nodes()
+
+
+@app.put("/api/propagation_nodes")
+async def api_set_propagation_nodes(payload: dict):
+    """Accept {outbound?: <hex>|null, inbound?: <hex>|null}.
+
+    Passing null or empty string for a role clears it. Unspecified roles
+    are left untouched. Invalid hashes are rejected with 400 and no
+    config write.
+    """
+    payload = payload or {}
+    updates: dict = {}
+    for role in ("outbound", "inbound"):
+        if role not in payload:
+            continue
+        val = payload[role]
+        if val in (None, ""):
+            updates[f"{role}_propagation_node"] = None
+            continue
+        if not isinstance(val, str):
+            return JSONResponse(
+                {"error": f"{role} must be a hex string or null"}, status_code=400
+            )
+        try:
+            normalize_hash(val)
+        except ValueError as e:
+            return JSONResponse(
+                {"error": f"invalid {role} hash: {e}"}, status_code=400
+            )
+        updates[f"{role}_propagation_node"] = val.strip()
+    if updates:
+        update_config(**updates)
+        if lxmf_router is not None:
+            _apply_propagation_nodes(lxmf_router)
+    return get_propagation_nodes()
 
 
 @app.post("/api/announce")
