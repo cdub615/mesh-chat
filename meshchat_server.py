@@ -586,6 +586,46 @@ def api_announce():
     return {"status": "announced"}
 
 
+def _path_metrics(dest_hash: bytes) -> dict:
+    """Look up hop count, next hop, and path timestamps from RNS.Transport.
+
+    RNS.Transport.path_table rows are [TIMESTAMP, NEXT_HOP, HOPS, EXPIRES, ...].
+    Missing/unknown entries return null fields. hops_to() returns the
+    PATHFINDER_M sentinel (128) when the path is unknown — normalise that
+    to null so the frontend can trust a non-null hops field.
+    """
+    metrics: dict = {
+        "hops": None,
+        "next_hop": None,
+        "path_cost": None,
+        "last_path_update": None,
+        "path_expires": None,
+    }
+    try:
+        hops = RNS.Transport.hops_to(dest_hash)
+        if hops != RNS.Transport.PATHFINDER_M:
+            metrics["hops"] = hops
+            # RNS 1.1.x uses hops as path cost; keep the field for forward-compat.
+            metrics["path_cost"] = hops
+    except Exception:
+        pass
+
+    # path_table read is best-effort; lock is held internally by RNS when
+    # the table is written, but a dict.get on a tuple is atomic enough for
+    # our read-only purposes.
+    entry = RNS.Transport.path_table.get(dest_hash)
+    if entry is not None:
+        try:
+            metrics["last_path_update"] = entry[0]
+            nh = entry[1]
+            if isinstance(nh, (bytes, bytearray)):
+                metrics["next_hop"] = nh.hex()
+            metrics["path_expires"] = entry[3]
+        except (IndexError, TypeError):
+            pass
+    return metrics
+
+
 @app.get("/api/peers")
 def api_peers():
     with get_db() as db:
@@ -596,13 +636,19 @@ def api_peers():
     for r in rows:
         peer = dict(r)
         try:
-            peer["has_path"] = RNS.Transport.has_path(normalize_hash(r["hash"]))
+            dest_hash = normalize_hash(r["hash"])
+            peer["has_path"] = RNS.Transport.has_path(dest_hash)
+            peer.update(_path_metrics(dest_hash))
         except ValueError as e:
             RNS.log(
                 f"[MeshChat] /api/peers: skipping malformed stored hash {r['hash']!r}: {e}",
                 RNS.LOG_WARNING,
             )
             peer["has_path"] = False
+            peer.update({
+                "hops": None, "next_hop": None, "path_cost": None,
+                "last_path_update": None, "path_expires": None,
+            })
         peers.append(peer)
     return peers
 
