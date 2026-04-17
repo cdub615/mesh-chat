@@ -77,9 +77,25 @@
       padding: 10px 14px; font-size: 13px; font-weight: 500; color: var(--text-muted);
       border: none; background: none; cursor: pointer; border-bottom: 2px solid transparent;
       transition: color .15s, border-color .15s; white-space: nowrap;
+      position: relative;
     }
     .nav-tab.active { color: var(--text-primary); border-bottom-color: var(--accent); }
     .nav-tab:hover:not(.active) { color: var(--text-secondary); }
+    .tab-badge {
+      display: inline-block; min-width: 16px; height: 16px; padding: 0 4px;
+      border-radius: 8px; background: var(--accent); color: #0a0a0a;
+      font-family: var(--font-mono); font-size: 10px; font-weight: 700;
+      line-height: 16px; text-align: center; margin-left: 4px;
+      vertical-align: middle;
+    }
+    .tab-badge.hidden { display: none; }
+    .peer-badge {
+      display: inline-block; min-width: 16px; height: 16px; padding: 0 5px;
+      border-radius: 8px; background: var(--accent); color: #0a0a0a;
+      font-family: var(--font-mono); font-size: 10px; font-weight: 700;
+      line-height: 16px; text-align: center; margin-left: 6px;
+      vertical-align: middle;
+    }
 
     /* content */
     #content { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
@@ -351,7 +367,7 @@
   </div>
 
   <div id="nav">
-    <button class="nav-tab active" data-tab="messages" onclick="switchTab('messages',this)">Messages</button>
+    <button class="nav-tab active" data-tab="messages" onclick="switchTab('messages',this)">Messages<span id="messages-badge" class="tab-badge hidden">0</span></button>
     <button class="nav-tab" data-tab="contacts"        onclick="switchTab('contacts',this)">Nodes</button>
     <button class="nav-tab" data-tab="settings"        onclick="switchTab('settings',this)">Settings</button>
   </div>
@@ -504,6 +520,56 @@ let activeConversation = null;
 let messageCache = [];
 const CONV_KEY = 'meshchat_active_conversation';
 
+// Unread badge state (cxa.4)
+// unreadByPeer maps peer hash -> integer count. Persisted so a closed tab
+// doesn't lose the state. activeTab is used to decide whether an inbound
+// while viewing a different tab should count as unread.
+let unreadByPeer = new Map();
+let activeTab = 'messages';
+const UNREAD_KEY = 'meshchat_unread';
+
+function loadUnread() {
+  try {
+    const raw = localStorage.getItem(UNREAD_KEY);
+    if (raw) unreadByPeer = new Map(Object.entries(JSON.parse(raw)));
+  } catch {}
+}
+
+function saveUnread() {
+  localStorage.setItem(UNREAD_KEY, JSON.stringify(Object.fromEntries(unreadByPeer)));
+}
+
+function bumpUnread(peerHash) {
+  unreadByPeer.set(peerHash, (unreadByPeer.get(peerHash) || 0) + 1);
+  saveUnread();
+  renderBadges();
+}
+
+function clearUnread(peerHash) {
+  if (unreadByPeer.delete(peerHash)) {
+    saveUnread();
+    renderBadges();
+  }
+}
+
+function totalUnread() {
+  let n = 0;
+  for (const v of unreadByPeer.values()) n += v;
+  return n;
+}
+
+function renderBadges() {
+  const badge = document.getElementById('messages-badge');
+  const total = totalUnread();
+  if (total > 0) {
+    badge.textContent = total > 99 ? '99+' : String(total);
+    badge.classList.remove('hidden');
+  } else {
+    badge.classList.add('hidden');
+  }
+  // Per-peer badges are injected into the Nodes list by renderNodes().
+}
+
 function peerOfMsg(m) {
   // Return the "other party" in the conversation for grouping.
   return m.direction === 'out' ? m.to_hash : m.from_hash;
@@ -519,6 +585,8 @@ window.addEventListener('load', async () => {
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
   document.getElementById('ws-url-desc').textContent = WS;
   activeConversation = localStorage.getItem(CONV_KEY) || null;
+  loadUnread();
+  renderBadges();
   showSkeletons();
   await loadIdentity();
   await loadMessages();
@@ -689,11 +757,14 @@ function connectWS() {
         };
         messageCache.push(record);
         rendered.add(msg.id);
-        if (belongsToActive(record)) {
+        const viewingThisPeer = (activeTab === 'messages' && belongsToActive(record));
+        if (viewingThisPeer) {
           removeEmptyState();
           maybeInsertDateSep(record.ts);
           paintMsg(record);
           scrollBottom();
+        } else {
+          bumpUnread(msg.from);
         }
         toast(`↓ ${shortHash(msg.from)}`);
         doVibrate();
@@ -931,12 +1002,16 @@ function renderNodes() {
     const cls = avs[i++ % avs.length];
     const pathCls = node.has_path ? 'reachable' : 'unknown';
     const seenLabel = node.last_seen_ts ? timeAgo(node.last_seen_ts) : '—';
+    const unread = unreadByPeer.get(hash) || 0;
+    const badge = unread > 0
+      ? `<span class="peer-badge">${unread > 99 ? '99+' : unread}</span>`
+      : '';
     const d = document.createElement('div');
     d.className = 'contact-item';
     d.innerHTML = `
       <div class="contact-avatar ${cls}">${esc((node.name || shortHash(hash))[0].toUpperCase())}</div>
       <div class="contact-info" style="cursor:pointer" onclick="selectDest('${esc(hash)}')">
-        <div class="contact-name"><span class="path-dot ${pathCls}"></span>${esc(node.name || shortHash(hash))}</div>
+        <div class="contact-name"><span class="path-dot ${pathCls}"></span>${esc(node.name || shortHash(hash))}${badge}</div>
         <div class="contact-addr">${esc(hash)}</div>
       </div>
       <div class="contact-meta">
@@ -970,11 +1045,13 @@ function selectConversation(hash) {
   activeConversation = hash;
   if (hash) localStorage.setItem(CONV_KEY, hash);
   else localStorage.removeItem(CONV_KEY);
+  if (hash) clearUnread(hash);
   // Keep dest-input in sync for the fallback no-conversation-active code path.
   if (hash && hash !== 'broadcast') {
     document.getElementById('dest-input').value = hash;
   }
   repaintConversation();
+  renderNodes();
 }
 
 function clearConversation() {
@@ -999,6 +1076,11 @@ function switchTab(name, el) {
   document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
   document.getElementById(name + '-view').classList.add('active');
   el.classList.add('active');
+  activeTab = name;
+  // Landing on Messages for a specific conversation counts as reading it.
+  if (name === 'messages' && activeConversation) {
+    clearUnread(activeConversation);
+  }
 }
 
 function setStatus(cls, text) {
