@@ -13,8 +13,10 @@ Run:
 
 import asyncio
 import json
+import logging
 import os
 import sqlite3
+import sys
 import tempfile
 import threading
 import time
@@ -40,6 +42,40 @@ CONFIG_PATH = DATA_DIR / "config.json"
 PORT = 8080
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# ── Logging ────────────────────────────────────────────────────────────────
+# We intentionally keep two log streams: `logger` for app-level events
+# (lifecycle, retries, DB, graceful shutdown) and RNS.log for RNS/LXMF
+# protocol events that belong with the RNS library's own noise. Ops can
+# filter journalctl by either prefix.
+logger = logging.getLogger("meshchat")
+
+
+def _configure_logging() -> None:
+    """Attach a stdout handler to the 'meshchat' logger.
+
+    Idempotent — if a handler is already attached (e.g. uvicorn set one up
+    or the module was reloaded) we leave it alone. Stays isolated from the
+    root logger so RNS's own stderr output and uvicorn's access log aren't
+    duplicated.
+    """
+    if logger.handlers:
+        return
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s [meshchat] %(levelname)s %(message)s",
+            datefmt="%Y-%m-%dT%H:%M:%S",
+        )
+    )
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    # Don't double-log to the root handler uvicorn may have configured.
+    logger.propagate = False
+
+
+_configure_logging()
 
 
 # Serializes read-modify-write on config.json so two concurrent PUTs to
@@ -510,6 +546,10 @@ def start_reticulum() -> bool:
 
         rns_ready = True
         rns_error = None
+        logger.info(
+            "Reticulum/LXMF ready; address %s",
+            RNS.prettyhexrep(local_destination.hash),
+        )
 
         # Auto-announce on boot so other nodes discover us
         send_announce("startup")
@@ -526,6 +566,7 @@ def start_reticulum() -> bool:
             f"retry every {int(RNS_RETRY_INTERVAL)}s.",
             RNS.LOG_ERROR,
         )
+        logger.error("Reticulum init failed: %s", rns_error)
         return False
 
 
@@ -533,11 +574,11 @@ async def _rns_retry_loop():
     """Periodically retry Reticulum init until it succeeds."""
     while not rns_ready:
         await asyncio.sleep(RNS_RETRY_INTERVAL)
-        RNS.log("[MeshChat] Retrying Reticulum init...")
+        logger.info("Retrying Reticulum init...")
         # Run the sync init off the event loop so we don't block ws/http.
         ok = await asyncio.get_running_loop().run_in_executor(None, start_reticulum)
         if ok:
-            RNS.log("[MeshChat] Reticulum init recovered")
+            logger.info("Reticulum init recovered after degraded startup")
             return
 
 
@@ -557,12 +598,14 @@ def _resurrect_queued_messages() -> int:
 async def lifespan(app: FastAPI):
     global main_loop
     main_loop = asyncio.get_running_loop()
+    logger.info("MeshChat starting up")
     init_db()
     resurrected = _resurrect_queued_messages()
     if resurrected:
         RNS.log(
             f"[MeshChat] Resurrected {resurrected} queued message(s) for retry"
         )
+        logger.info("Resurrected %d queued message(s) for retry", resurrected)
     rns_retry_task: Optional[asyncio.Task] = None
     if not start_reticulum():
         rns_retry_task = asyncio.create_task(_rns_retry_loop())
@@ -571,9 +614,11 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        logger.info("MeshChat shutting down")
         await _graceful_shutdown(
             [queued_retry_task, interfaces_task, rns_retry_task]
         )
+        logger.info("MeshChat shutdown complete")
 
 
 async def _graceful_shutdown(tasks: list) -> None:
