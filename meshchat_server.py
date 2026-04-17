@@ -571,10 +571,59 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        for t in (queued_retry_task, interfaces_task, rns_retry_task):
-            if t is not None and not t.done():
-                t.cancel()
-    # Reticulum / LXMF cleans up on process exit naturally
+        await _graceful_shutdown(
+            [queued_retry_task, interfaces_task, rns_retry_task]
+        )
+
+
+async def _graceful_shutdown(tasks: list) -> None:
+    """Cancel background tasks, close client WebSockets with 1001, flush
+    LXMF and Reticulum state. Every step is isolated so a failure in one
+    doesn't block the others — we want to do as much cleanup as we can
+    before the process exits."""
+    # 1. Cancel background tasks and await them so they stop touching LXMF
+    #    before we call exit_handler.
+    for t in tasks:
+        if t is not None and not t.done():
+            t.cancel()
+    for t in tasks:
+        if t is None:
+            continue
+        try:
+            await t
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    # 2. Close WebSocket clients with Going Away (1001) so browsers show a
+    #    proper disconnect instead of reconnect-looping against a dead TCP.
+    for ws in list(manager.active):
+        try:
+            await ws.close(code=1001)
+        except Exception:
+            pass
+    manager.active.clear()
+
+    # 3. Flush LXMF state so queued deliveries and peer tickets land on
+    #    disk. exit_handler exists on LXMRouter (confirmed LXMF 0.9.4).
+    if lxmf_router is not None:
+        try:
+            lxmf_router.exit_handler()
+        except Exception as e:
+            try:
+                RNS.log(f"[MeshChat] LXMF exit_handler failed: {e}", RNS.LOG_ERROR)
+            except Exception:
+                pass
+
+    # 4. Flush RNS state. Static on Reticulum in RNS 1.1.x.
+    try:
+        rns_exit = getattr(RNS.Reticulum, "exit_handler", None)
+        if callable(rns_exit):
+            rns_exit()
+    except Exception as e:
+        try:
+            RNS.log(f"[MeshChat] RNS exit_handler failed: {e}", RNS.LOG_ERROR)
+        except Exception:
+            pass
 
 
 app = FastAPI(lifespan=lifespan)
