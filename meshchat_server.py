@@ -995,6 +995,11 @@ def api_interfaces():
 
 INTERFACES_BROADCAST_INTERVAL = 10.0
 
+# WebSocket idle timeout; if no client message arrives within this window,
+# we send a server ping to keep the connection alive and to detect dead
+# sockets (a failed send then tears it down).
+WS_PING_INTERVAL = 30.0
+
 
 async def _interfaces_broadcast_loop():
     """Push interface snapshots over WebSocket so the frontend can pulse
@@ -1236,9 +1241,28 @@ async def websocket_endpoint(ws: WebSocket):
     await manager.connect(ws)
     try:
         while True:
-            # Keep alive — client can optionally send pings
-            data = await ws.receive_text()
-    except WebSocketDisconnect:
+            try:
+                await asyncio.wait_for(
+                    ws.receive_text(), timeout=WS_PING_INTERVAL
+                )
+                # We don't do anything with incoming text today; it's there
+                # so the client can ping us if it wants. Reaching here just
+                # means the connection is still alive.
+            except asyncio.TimeoutError:
+                # No activity in WS_PING_INTERVAL: send an app-level ping.
+                # If the send fails, the client is gone — break so the
+                # finally clause prunes the connection.
+                try:
+                    await ws.send_text(json.dumps({"type": "ping"}))
+                except Exception as e:
+                    logger.debug(
+                        "WebSocket ping send failed: %s: %s",
+                        type(e).__name__, e,
+                    )
+                    break
+            except WebSocketDisconnect:
+                break
+    finally:
         manager.disconnect(ws)
 
 
