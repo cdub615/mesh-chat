@@ -150,11 +150,22 @@ The server binds to `0.0.0.0:8080`. Open `http://<pi-ip>:8080` from any device o
 ### 4. Use it
 
 - Open the URL in your phone's browser
-- Tap **Add to Home Screen** for a native-app feel (PWA install)
+- Install as an app for a native-app feel:
+  - **iOS** — Share sheet → **Add to Home Screen**
+  - **Android** (Chrome) — **Settings → Install** (button appears when `beforeinstallprompt` fires)
 - Set your display name in **Settings**
 - Paste or scan a destination hash and start messaging
 
 All user data lives in `~/.meshchat/` — wipe that directory to reset identity and history.
+
+## Offline & PWA
+
+MeshChat is designed to keep working when the node's LAN drops out from under you.
+
+- **Offline outbound queue** — Messages composed while offline are stashed in IndexedDB and retried automatically via the Service Worker's Background Sync. The message shows `☁ offline · queued` until it flushes, at which point the server takes over with its own retry schedule.
+- **Service worker update flow** — The server stamps each deploy with an `APP_VERSION` (git short SHA by default, or `MESHCHAT_VERSION` if set) and serves `/sw.js` with that string baked in. When you update the server, connected clients quietly pick up the new worker on the next visit — no hard refresh needed.
+- **Web Share Target** (Android) — Once installed, MeshChat appears in the system share sheet. Sharing text from another app opens the Messages tab with the body pre-filled; pick a peer and send.
+- **Reconnect behaviour** — The WebSocket auto-reconnects with a status banner; the retry worker re-drives any queued server-side messages when RNS comes back up.
 
 ## Configuration
 
@@ -174,6 +185,7 @@ MeshChat reads configuration from environment variables prefixed with `MESHCHAT_
 | `MESHCHAT_DEST_CACHE_TTL` | `3600` s | LXMF destination cache lifetime |
 | `MESHCHAT_INTERFACES_BROADCAST_INTERVAL` | `10` s | How often interface snapshots are pushed over WS |
 | `MESHCHAT_WS_PING_INTERVAL` | `30` s | Idle WebSocket keepalive |
+| `MESHCHAT_VERSION` | *(git short SHA or file mtime)* | Overrides the version string used for PWA cache-busting |
 
 Example `.env`:
 
@@ -242,6 +254,7 @@ App-level events log under the `[meshchat]` prefix; Reticulum/LXMF protocol even
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/identity` | Node hash, display name, and RNS-ready status |
+| `GET` | `/api/version` | App version string (used by the client to detect deploys) |
 | `GET` | `/api/messages?limit=N` | Message history (newest first) |
 | `POST` | `/api/messages` | Send a message: `{to, body, method?}`; returns **202 `path_requested`** if the path is unknown |
 | `PUT` | `/api/display_name` | Update the local display name |
@@ -255,6 +268,16 @@ App-level events log under the `[meshchat]` prefix; Reticulum/LXMF protocol even
 | `WS` | `/ws` | Real-time push: messages, status updates, peer events, interface snapshots |
 
 Requests that need Reticulum are gated by a `require_rns_ready` dependency and will return **503** until the RNS stack has come up.
+
+## Troubleshooting
+
+| Symptom | Likely cause | Where to look |
+|---|---|---|
+| `503` from `/api/announce`, `/api/messages` | Reticulum hasn't finished starting | `journalctl -u meshchat` for `[meshchat]` startup lines; `GET /api/identity` reports `rns_ready` |
+| No peers ever show up | RNode isn't enumerating as a Reticulum interface | `GET /api/interfaces`; check `~/.reticulum/config` has your serial/LoRa interface and the device path matches |
+| Messages stuck on `queued` | Path to destination not yet resolved | Send an announce or wait — the retry schedule backs off to 10 min; status flips once a path arrives |
+| Install button never appears on Android | `beforeinstallprompt` only fires on eligible sites (HTTPS or `localhost`) | Try from the Pi's `localhost` or put a reverse proxy in front with TLS |
+| SW never updates after deploy | Proxy or CDN caching `/sw.js` | Confirm the server's `Cache-Control: no-cache` on `/sw.js` is reaching the client untouched |
 
 ## Development
 
