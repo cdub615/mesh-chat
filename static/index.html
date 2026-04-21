@@ -117,6 +117,24 @@
     #conn-banner.error { background: rgba(220,38,38,0.15); color: #fca5a5; }
     #conn-banner.ok { background: var(--accent-dim); color: var(--accent); }
 
+    /* b3q.45 update prompt — user-driven SW activation so an in-flight compose
+       is not lost when a new deploy is detected. */
+    #update-banner {
+      flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+      gap: 12px; padding: 8px 16px;
+      font-family: var(--font-ui); font-size: 13px; font-weight: 500;
+      background: var(--blue-dim); color: var(--blue);
+      border-bottom: 1px solid var(--border);
+    }
+    #update-banner.hidden { display: none; }
+    #update-refresh-btn {
+      min-height: 30px; padding: 4px 12px; border-radius: var(--radius-sm);
+      background: var(--blue); color: #0a0a0a; border: none;
+      font-family: var(--font-ui); font-size: 12px; font-weight: 600;
+      cursor: pointer;
+    }
+    #update-refresh-btn:hover, #update-refresh-btn:focus { opacity: 0.9; outline: none; }
+
     #nav {
       flex-shrink: 0; display: flex; align-items: center; gap: 2px;
       padding: 0 16px; background: var(--bg-surface); border-bottom: 1px solid var(--border);
@@ -476,6 +494,11 @@
     <span id="conn-banner-text"></span>
   </div>
 
+  <div id="update-banner" class="hidden" role="status" aria-live="polite">
+    <span>New version available</span>
+    <button id="update-refresh-btn" type="button">Refresh</button>
+  </div>
+
   <div id="nav">
     <button class="nav-tab active" data-tab="messages" onclick="switchTab('messages',this)">Messages<span id="messages-badge" class="tab-badge hidden">0</span></button>
     <button class="nav-tab" data-tab="contacts"        onclick="switchTab('contacts',this)">Nodes</button>
@@ -742,9 +765,61 @@ function belongsToActive(m) {
   return peerOfMsg(m) === activeConversation;
 }
 
+// ── Service worker registration + gentle update flow (b3q.45) ──────────────
+// An update is detected when a new SW finishes installing while another SW
+// is still in control. We show #update-banner and only activate the new SW
+// when the user clicks Refresh, so a message being composed isn't blown away.
+let userTriggeredRefresh = false;
+async function registerSW() {
+  try {
+    const reg = await navigator.serviceWorker.register('/sw.js');
+
+    // A worker may already be waiting if the tab was reopened between
+    // the SW finishing install and the user returning.
+    if (reg.waiting && navigator.serviceWorker.controller) {
+      showUpdateBanner(reg.waiting);
+    }
+
+    reg.addEventListener('updatefound', () => {
+      const inst = reg.installing;
+      if (!inst) return;
+      inst.addEventListener('statechange', () => {
+        if (inst.state === 'installed' && navigator.serviceWorker.controller) {
+          showUpdateBanner(inst);
+        }
+      });
+    });
+
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (userTriggeredRefresh) location.reload();
+    });
+
+    // Light background check for new versions while the tab is open.
+    setInterval(() => reg.update().catch(() => {}), 10 * 60 * 1000);
+  } catch {
+    // Fail silent: PWA works degraded without a SW.
+  }
+}
+
+function showUpdateBanner(worker) {
+  const banner = document.getElementById('update-banner');
+  const btn = document.getElementById('update-refresh-btn');
+  if (!banner || !btn) return;
+  banner.classList.remove('hidden');
+  btn.onclick = () => {
+    userTriggeredRefresh = true;
+    btn.disabled = true;
+    btn.textContent = 'refreshing…';
+    worker.postMessage({ type: 'SKIP_WAITING' });
+    // controllerchange will fire and reload; as a safety net, reload
+    // after 1500ms in case the browser doesn't fire the event.
+    setTimeout(() => location.reload(), 1500);
+  };
+}
+
 // ── Boot ────────────────────────────────────────────────────────────────────
 window.addEventListener('load', async () => {
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+  if ('serviceWorker' in navigator) registerSW();
   document.getElementById('ws-url-desc').textContent = WS;
   activeConversation = localStorage.getItem(CONV_KEY) || null;
   loadUnread();

@@ -29,7 +29,7 @@ import RNS
 import LXMF
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -75,6 +75,39 @@ DB_PATH = DATA_DIR / "messages.db"
 IDENTITY_PATH = DATA_DIR / "identity"
 CONFIG_PATH = DATA_DIR / "config.json"
 PORT = settings.port
+
+
+# ── App version (cache-busting) ─────────────────────────────────────────────
+def _compute_version() -> str:
+    """Best-effort short version string used to invalidate the PWA cache.
+
+    Tries $MESHCHAT_VERSION, then the short git HEAD, then the server file's
+    mtime so a deployed tree without .git still changes its version when
+    the code is updated.
+    """
+    env = os.environ.get("MESHCHAT_VERSION")
+    if env:
+        return env
+    try:
+        import subprocess
+
+        out = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(Path(__file__).parent),
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+        ).decode().strip()
+        if out:
+            return out
+    except Exception:
+        pass
+    try:
+        return str(int(Path(__file__).stat().st_mtime))
+    except Exception:
+        return "dev"
+
+
+APP_VERSION: str = _compute_version()
 
 
 # ── Logging ────────────────────────────────────────────────────────────────
@@ -837,6 +870,36 @@ def require_rns_ready() -> None:
 
 
 # ── REST API ────────────────────────────────────────────────────────────────
+
+
+@app.get("/api/version")
+async def api_version():
+    """Expose the current app version. The frontend polls this for update
+    detection; the service worker is also served with this string baked
+    into its body so the SW bytes change across deploys.
+    """
+    return {"version": APP_VERSION}
+
+
+@app.get("/sw.js")
+async def sw_js():
+    """Serve the service worker with APP_VERSION substituted in.
+
+    The SW file's bytes change whenever APP_VERSION changes, which is what
+    tells the browser there's a new service worker worth installing. Must
+    not be cached by intermediaries, or cache-busting defeats itself.
+    """
+    sw_path = STATIC_DIR / "sw.js"
+    try:
+        text = sw_path.read_text()
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="sw.js missing")
+    text = text.replace("__MESHCHAT_VERSION__", APP_VERSION)
+    return Response(
+        content=text,
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
 
 
 @app.get("/api/identity")

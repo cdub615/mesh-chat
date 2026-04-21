@@ -1,7 +1,11 @@
 // MeshChat Service Worker
-// Caches UI shell for offline use. Messages only sync when on Pi's WiFi AP.
+// Caches UI shell for offline use. The server inlines APP_VERSION into
+// __MESHCHAT_VERSION__ at request time (see /sw.js route in
+// meshchat_server.py) so the SW bytes change on every deploy, which is
+// what triggers the browser to install an update.
 
-const CACHE_NAME = 'meshchat-v5';
+const CACHE_VERSION = '__MESHCHAT_VERSION__';
+const CACHE_NAME = 'meshchat-' + CACHE_VERSION;
 const SHELL_ASSETS = [
   '/',
   '/index.html',
@@ -10,30 +14,44 @@ const SHELL_ASSETS = [
 ];
 
 self.addEventListener('install', (e) => {
+  // Pre-cache the shell. Do NOT self.skipWaiting() here; the client will
+  // ask via postMessage({type:'SKIP_WAITING'}) when the user accepts the
+  // "new version available" prompt, so an in-flight compose isn't lost.
   e.waitUntil(
     caches.open(CACHE_NAME).then(cache => cache.addAll(SHELL_ASSETS))
   );
-  self.skipWaiting();
 });
 
 self.addEventListener('activate', (e) => {
   e.waitUntil(
-    caches.keys().then(keys =>
-      Promise.all(keys.filter(k => k !== CACHE_NAME).map(k => caches.delete(k)))
-    )
+    caches.keys()
+      .then(keys =>
+        Promise.all(keys.filter(k => k !== CACHE_NAME).map(k => caches.delete(k)))
+      )
+      .then(() => self.clients.claim())
   );
-  self.clients.claim();
+});
+
+self.addEventListener('message', (e) => {
+  if (e.data && e.data.type === 'SKIP_WAITING') {
+    self.skipWaiting();
+  }
 });
 
 self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
 
-  // Always go network-first for API and WebSocket endpoints
-  if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/ws')) {
-    return; // let browser handle naturally
+  // Network-first for API, WebSocket, and the SW itself (so update detection
+  // isn't defeated by its own cache entry).
+  if (
+    url.pathname.startsWith('/api/') ||
+    url.pathname.startsWith('/ws') ||
+    url.pathname === '/sw.js'
+  ) {
+    return;
   }
 
-  // Cache-first for UI shell assets
+  // Cache-first for UI shell assets.
   e.respondWith(
     caches.match(e.request).then(cached => {
       if (cached) return cached;
