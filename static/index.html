@@ -495,6 +495,10 @@
       <div class="section-header">notifications</div>
       <div class="settings-group">
         <div class="settings-row">
+          <div><div class="settings-label">Desktop/phone notifications</div><div class="settings-desc" id="notif-desc">prompt to enable</div></div>
+          <div class="toggle" id="toggle-notifications" onclick="toggleNotifications(this)"></div>
+        </div>
+        <div class="settings-row">
           <div><div class="settings-label">Vibrate on inbound</div><div class="settings-desc">haptic on new message</div></div>
           <div class="toggle on" id="toggle-vibrate" onclick="this.classList.toggle('on')"></div>
         </div>
@@ -549,6 +553,7 @@ const CONV_KEY = 'meshchat_active_conversation';
 let unreadByPeer = new Map();
 let activeTab = 'messages';
 const UNREAD_KEY = 'meshchat_unread';
+const NOTIFICATIONS_KEY = 'meshchat_notifications_enabled';
 
 function loadUnread() {
   try {
@@ -632,6 +637,7 @@ window.addEventListener('load', async () => {
   activeConversation = localStorage.getItem(CONV_KEY) || null;
   loadUnread();
   renderBadges();
+  updateNotifToggleUI();
   showSkeletons();
   await loadIdentity();
   await loadMessages();
@@ -838,6 +844,7 @@ function connectWS() {
         }
         toast(`↓ ${shortHash(msg.from)}`);
         doVibrate();
+        fireInboundNotification(msg);
         updateNode(msg.from, { last_seen_ts: Date.now() / 1000 });
       } else if (msg.type === 'status_update') {
         resolveById(msg.msg_id, msg.status);
@@ -1283,6 +1290,82 @@ function toast(msg) {
 function doVibrate() {
   if (document.getElementById('toggle-vibrate').classList.contains('on') && navigator.vibrate)
     navigator.vibrate([40, 20, 40]);
+}
+
+// ── Notifications (cxa.5) ────────────────────────────────────────────────────
+// Desktop/phone notifications for inbound messages while the page is hidden.
+// Uses localStorage as source of truth for the user's choice; Notification.permission
+// is consulted each time in case the user revoked it from browser settings.
+function notificationsSupported() { return 'Notification' in window; }
+
+function notificationsAllowed() {
+  return notificationsSupported()
+    && Notification.permission === 'granted'
+    && localStorage.getItem(NOTIFICATIONS_KEY) === '1';
+}
+
+function updateNotifToggleUI() {
+  const toggle = document.getElementById('toggle-notifications');
+  const desc = document.getElementById('notif-desc');
+  if (!toggle || !desc) return;
+  if (!notificationsSupported()) {
+    toggle.classList.remove('on');
+    toggle.style.opacity = '0.4';
+    toggle.style.pointerEvents = 'none';
+    desc.textContent = 'not supported in this browser';
+    return;
+  }
+  if (Notification.permission === 'denied') {
+    toggle.classList.remove('on');
+    desc.textContent = 'blocked — enable in browser settings';
+    return;
+  }
+  const enabled = Notification.permission === 'granted'
+    && localStorage.getItem(NOTIFICATIONS_KEY) === '1';
+  toggle.classList.toggle('on', enabled);
+  desc.textContent = enabled ? 'on — alerts when app is backgrounded' : 'prompt to enable';
+}
+
+async function toggleNotifications(el) {
+  if (!notificationsSupported()) {
+    toast('notifications not supported in this browser');
+    return;
+  }
+  if (el.classList.contains('on')) {
+    localStorage.setItem(NOTIFICATIONS_KEY, '0');
+    updateNotifToggleUI();
+    return;
+  }
+  if (Notification.permission === 'denied') {
+    toast('notifications blocked — enable in browser settings');
+    updateNotifToggleUI();
+    return;
+  }
+  let perm = Notification.permission;
+  if (perm !== 'granted') {
+    try { perm = await Notification.requestPermission(); } catch { perm = 'denied'; }
+  }
+  localStorage.setItem(NOTIFICATIONS_KEY, perm === 'granted' ? '1' : '0');
+  updateNotifToggleUI();
+}
+
+function fireInboundNotification(msg) {
+  if (!notificationsAllowed()) return;
+  if (document.visibilityState !== 'hidden') return;
+  try {
+    const peer = nodes.get(msg.from);
+    const title = (peer && peer.name) || shortHash(msg.from);
+    const n = new Notification(title, {
+      body: msg.body,
+      tag: msg.from,
+      renotify: true,
+    });
+    n.onclick = () => {
+      window.focus();
+      try { selectDest(msg.from); } catch {}
+      n.close();
+    };
+  } catch {}
 }
 
 // ── Format helpers ───────────────────────────────────────────────────────────
