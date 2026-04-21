@@ -608,6 +608,18 @@
           </div>
         </div>
       </div>
+      <!-- b3q.49 Install-to-home-screen (Android Chrome). Hidden until
+           beforeinstallprompt fires; removed permanently on appinstalled. -->
+      <div id="install-section" class="section-header" style="display:none">install</div>
+      <div id="install-group" class="settings-group" style="display:none">
+        <div class="settings-row">
+          <div>
+            <div class="settings-label">Add to home screen</div>
+            <div class="settings-desc">install MeshChat as an app</div>
+          </div>
+          <button class="copy-btn" id="install-btn" type="button" onclick="doInstall()">install</button>
+        </div>
+      </div>
       <div class="section-header">connection</div>
       <div class="settings-group">
         <div class="settings-row">
@@ -763,6 +775,47 @@ function peerOfMsg(m) {
 function belongsToActive(m) {
   if (!activeConversation) return false;
   return peerOfMsg(m) === activeConversation;
+}
+
+// ── PWA install prompt (b3q.49) ─────────────────────────────────────────────
+// Android Chrome fires beforeinstallprompt when the site is installable.
+// Stash it and expose an Install button in Settings; iOS doesn't fire this
+// event so the Install section simply stays hidden there (iOS users install
+// via the share sheet, which is a platform limitation).
+let deferredInstallPrompt = null;
+
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  deferredInstallPrompt = e;
+  const sec = document.getElementById('install-section');
+  const grp = document.getElementById('install-group');
+  if (sec) sec.style.display = '';
+  if (grp) grp.style.display = '';
+});
+
+window.addEventListener('appinstalled', () => {
+  deferredInstallPrompt = null;
+  const sec = document.getElementById('install-section');
+  const grp = document.getElementById('install-group');
+  if (sec) sec.style.display = 'none';
+  if (grp) grp.style.display = 'none';
+  toast('installed · check your home screen');
+});
+
+async function doInstall() {
+  if (!deferredInstallPrompt) return;
+  const btn = document.getElementById('install-btn');
+  if (btn) btn.disabled = true;
+  try {
+    await deferredInstallPrompt.prompt();
+    const { outcome } = await deferredInstallPrompt.userChoice;
+    if (outcome === 'accepted') {
+      // Chrome consumes the event; appinstalled will hide the section.
+      deferredInstallPrompt = null;
+    }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 // ── Offline outbound queue (b3q.46) ─────────────────────────────────────────
