@@ -777,6 +777,38 @@ function belongsToActive(m) {
   return peerOfMsg(m) === activeConversation;
 }
 
+// ── Web Share Target (b3q.51) ───────────────────────────────────────────────
+// When MeshChat is registered as a share target (manifest.share_target),
+// Android Chrome navigates to /?title=…&text=…&url=… with the shared
+// payload. Intercept on load, pre-fill the compose box, and strip the
+// query so refresh doesn't replay the same share.
+function consumeShareTarget() {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const title = params.get('title') || '';
+    const text = params.get('text') || '';
+    const url = params.get('url') || '';
+    if (!title && !text && !url) return;
+
+    const parts = [text, url].filter(Boolean);
+    const prefill = parts.length > 0 ? parts.join('\n') : title;
+
+    const input = document.getElementById('msg-input');
+    if (input) {
+      input.value = prefill;
+      input.dispatchEvent(new Event('input'));
+    }
+    switchTab('messages', document.querySelector('[data-tab=messages]'));
+    toast('shared text ready — pick a peer');
+
+    // Clean URL so a refresh doesn't re-apply the share.
+    const clean = window.location.pathname;
+    window.history.replaceState({}, '', clean);
+  } catch {
+    // If anything goes wrong we'd rather drop the share than crash boot.
+  }
+}
+
 // ── PWA install prompt (b3q.49) ─────────────────────────────────────────────
 // Android Chrome fires beforeinstallprompt when the site is installable.
 // Stash it and expose an Install button in Settings; iOS doesn't fire this
@@ -1000,6 +1032,8 @@ window.addEventListener('load', async () => {
   if ('serviceWorker' in navigator) registerSW();
   // Sweep any leftover outbox items from a previous offline session.
   flushOutboxForeground().catch(() => {});
+  // Handle Web Share Target payloads when launched from a share sheet.
+  consumeShareTarget();
   document.getElementById('ws-url-desc').textContent = WS;
   activeConversation = localStorage.getItem(CONV_KEY) || null;
   loadUnread();
