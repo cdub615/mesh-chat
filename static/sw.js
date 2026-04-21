@@ -38,6 +38,88 @@ self.addEventListener('message', (e) => {
   }
 });
 
+// ── Offline outbound queue (b3q.46) ─────────────────────────────────────────
+// When the client can't reach the server, it stashes the send into the
+// IndexedDB outbox and registers a Background Sync tagged 'send-queue'.
+// When connectivity returns the browser fires a sync event here; we walk
+// the outbox, POST each entry, and notify any open client pages so their
+// optimistic bubbles resolve.
+
+const OUTBOX_DB = 'meshchat-outbox';
+const OUTBOX_STORE = 'sends';
+
+function openOutbox() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(OUTBOX_DB, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(OUTBOX_STORE)) {
+        db.createObjectStore(OUTBOX_STORE, { keyPath: 'tmpId' });
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function outboxAll(db) {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(OUTBOX_STORE, 'readonly');
+    const req = tx.objectStore(OUTBOX_STORE).getAll();
+    req.onsuccess = () => resolve(req.result || []);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function outboxDelete(db, tmpId) {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(OUTBOX_STORE, 'readwrite');
+    tx.objectStore(OUTBOX_STORE).delete(tmpId);
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function notifyClients(payload) {
+  const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+  for (const c of clients) c.postMessage(payload);
+}
+
+async function flushOutbox() {
+  const db = await openOutbox();
+  try {
+    const items = await outboxAll(db);
+    for (const item of items) {
+      const res = await fetch('/api/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: item.to, body: item.body, method: item.method }),
+      });
+      if (res.ok || res.status === 202) {
+        const d = await res.json().catch(() => ({}));
+        await outboxDelete(db, item.tmpId);
+        await notifyClients({
+          type: 'queue-flushed',
+          tmpId: item.tmpId,
+          realId: d.id || null,
+          status: d.status || (res.status === 202 ? 'queued' : 'sent'),
+        });
+      } else {
+        // Non-2xx: leave in the outbox and retry on the next sync.
+        throw new Error('send failed: ' + res.status);
+      }
+    }
+  } finally {
+    db.close();
+  }
+}
+
+self.addEventListener('sync', (e) => {
+  if (e.tag === 'send-queue') {
+    e.waitUntil(flushOutbox());
+  }
+});
+
 self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
 

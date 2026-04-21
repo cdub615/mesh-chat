@@ -765,6 +765,131 @@ function belongsToActive(m) {
   return peerOfMsg(m) === activeConversation;
 }
 
+// ── Offline outbound queue (b3q.46) ─────────────────────────────────────────
+// When sendMessage() can't reach the server, we persist the payload to
+// IndexedDB and either register a Background Sync or lean on foreground
+// events (online / visibilitychange) to flush. The SW also owns a sync
+// handler that flushes in the background on browsers that support it.
+
+const OUTBOX_DB_NAME = 'meshchat-outbox';
+const OUTBOX_STORE = 'sends';
+
+function openOutboxDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(OUTBOX_DB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(OUTBOX_STORE)) {
+        db.createObjectStore(OUTBOX_STORE, { keyPath: 'tmpId' });
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function outboxPut(item) {
+  const db = await openOutboxDB();
+  try {
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(OUTBOX_STORE, 'readwrite');
+      tx.objectStore(OUTBOX_STORE).put(item);
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+
+async function outboxGetAll() {
+  const db = await openOutboxDB();
+  try {
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(OUTBOX_STORE, 'readonly');
+      const req = tx.objectStore(OUTBOX_STORE).getAll();
+      req.onsuccess = () => resolve(req.result || []);
+      req.onerror = () => reject(req.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+
+async function outboxDelete(tmpId) {
+  const db = await openOutboxDB();
+  try {
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(OUTBOX_STORE, 'readwrite');
+      tx.objectStore(OUTBOX_STORE).delete(tmpId);
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+
+async function requestSyncRegistration() {
+  try {
+    if ('serviceWorker' in navigator && 'SyncManager' in window) {
+      const reg = await navigator.serviceWorker.ready;
+      await reg.sync.register('send-queue');
+    }
+  } catch {
+    // Background Sync unavailable (iOS Safari) — foreground flush handles it.
+  }
+}
+
+let flushing = false;
+async function flushOutboxForeground() {
+  if (flushing) return;
+  flushing = true;
+  try {
+    const items = await outboxGetAll();
+    if (items.length === 0) return;
+    for (const item of items) {
+      let res;
+      try {
+        res = await fetch(`${API}/api/messages`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ to: item.to, body: item.body, method: item.method }),
+        });
+      } catch {
+        return;  // still offline; bail and try again on next trigger
+      }
+      if (res.ok || res.status === 202) {
+        const d = await res.json().catch(() => ({}));
+        await outboxDelete(item.tmpId);
+        resolveOptimistic(
+          item.tmpId,
+          d.id || null,
+          d.status || (res.status === 202 ? 'queued' : 'sent')
+        );
+      } else {
+        // Server is reachable but rejected — leave in outbox for next try.
+        return;
+      }
+    }
+    toast('offline queue flushed');
+  } finally {
+    flushing = false;
+  }
+}
+
+window.addEventListener('online', () => flushOutboxForeground().catch(() => {}));
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') flushOutboxForeground().catch(() => {});
+});
+
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.addEventListener('message', (e) => {
+    const d = e.data;
+    if (!d || d.type !== 'queue-flushed') return;
+    resolveOptimistic(d.tmpId, d.realId || null, d.status || 'sent');
+  });
+}
+
 // ── Service worker registration + gentle update flow (b3q.45) ──────────────
 // An update is detected when a new SW finishes installing while another SW
 // is still in control. We show #update-banner and only activate the new SW
@@ -820,6 +945,8 @@ function showUpdateBanner(worker) {
 // ── Boot ────────────────────────────────────────────────────────────────────
 window.addEventListener('load', async () => {
   if ('serviceWorker' in navigator) registerSW();
+  // Sweep any leftover outbox items from a previous offline session.
+  flushOutboxForeground().catch(() => {});
   document.getElementById('ws-url-desc').textContent = WS;
   activeConversation = localStorage.getItem(CONV_KEY) || null;
   loadUnread();
@@ -1127,8 +1254,17 @@ async function sendMessage() {
       toast((d && (d.detail || d.error)) || 'send failed');
     }
   } catch {
-    resolveOptimistic(tmpId, null, 'failed');
-    toast('network error · not sent');
+    // Network failure — likely offline. Park the payload in the outbox so
+    // the SW (or a foreground flush on reconnect) can send it later.
+    try {
+      await outboxPut({ tmpId, to: dest, body, method: 'opportunistic', queuedAt: Date.now() });
+      resolveOptimistic(tmpId, null, 'queued-local');
+      toast('offline · queued on device');
+      requestSyncRegistration();
+    } catch {
+      resolveOptimistic(tmpId, null, 'failed');
+      toast('network error · not sent');
+    }
   }
 }
 
@@ -1279,11 +1415,13 @@ function setStatusEl(el, status) {
 function statusHTML(s) {
   const map = {
     sending: '◷ sending', queued: '◷ queued',
+    'queued-local': '☁ offline · queued',
     outbound: '◷ outbound', sent: '✓ sent',
     delivered: '✓✓ delivered', failed: '✕ failed', rejected: '✕ rejected',
   };
   const cls = {
-    sending: 'st-queued', queued: 'st-queued', outbound: 'st-queued',
+    sending: 'st-queued', queued: 'st-queued',
+    'queued-local': 'st-queued', outbound: 'st-queued',
     sent: 'st-sent', delivered: 'st-delivered',
     failed: 'st-failed', rejected: 'st-failed',
   };
