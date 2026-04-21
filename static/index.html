@@ -425,11 +425,12 @@
           <span class="dest-badge" onclick="switchTab('contacts', document.querySelector('[data-tab=contacts]'))">nodes ↗</span>
         </div>
         <div id="msg-row">
-          <textarea id="msg-input" placeholder="message…" rows="1" oninput="autoResize(this)" onkeydown="handleKey(event)"></textarea>
+          <textarea id="msg-input" placeholder="message…" rows="1" oninput="onComposeInput(this)" onkeydown="handleKey(event)"></textarea>
           <button id="send-btn" onclick="sendMessage()" title="Send" disabled>
             <svg viewBox="0 0 16 16" fill="none"><path d="M14 8L2 2l3 6-3 6 12-6z" fill="#0a0a0a"/></svg>
           </button>
         </div>
+        <div id="char-counter" style="display:none;font-family:var(--font-mono);font-size:10px;color:var(--text-muted);margin-top:4px;text-align:right;">0 / 500</div>
       </div>
     </div>
 
@@ -939,6 +940,7 @@ async function sendMessage() {
 
   document.getElementById('msg-input').value = '';
   document.getElementById('msg-input').style.height = 'auto';
+  document.getElementById('char-counter').style.display = 'none';
   scrollBottom();
 
   try {
@@ -1284,6 +1286,23 @@ function setStatus(cls, text) {
 }
 
 function autoResize(el) { el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 120) + 'px'; }
+
+// cxa.9: soft character budget. LXMF has no hard limit, but long bodies
+// fragment across LoRa packets — 500 bytes is ~one to two packets for
+// typical text. We warn, but never block.
+const CHAR_TARGET = 500;
+function onComposeInput(el) {
+  autoResize(el);
+  const counter = document.getElementById('char-counter');
+  const len = el.value.length;
+  if (len === 0) { counter.style.display = 'none'; return; }
+  counter.style.display = '';
+  counter.textContent = `${len} / ${CHAR_TARGET}`;
+  const ratio = len / CHAR_TARGET;
+  counter.style.color = ratio >= 1 ? 'var(--red)'
+                       : ratio >= 0.8 ? 'var(--amber)'
+                       : 'var(--text-muted)';
+}
 function handleKey(e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } }
 function scrollBottom() { document.getElementById('msg-anchor').scrollIntoView({ behavior: 'smooth' }); }
 
