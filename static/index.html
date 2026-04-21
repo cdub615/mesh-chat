@@ -288,6 +288,20 @@
          dispatch to the parent element. */
     }
 
+    /* cxa.13: visible focus rings for keyboard navigation. We suppress the
+       ring on mouse/touch via :focus-visible so it only appears when the
+       user actually tabs to an element. */
+    *:focus { outline: none; }
+    button:focus-visible,
+    [role="switch"]:focus-visible,
+    .nav-tab:focus-visible,
+    .dest-badge:focus-visible,
+    .contact-item:focus-visible,
+    a:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
     /* action sheet (cxa.14) */
     #sheet-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 9997; }
     #sheet-backdrop.hidden, #action-sheet.hidden { display: none; }
@@ -376,14 +390,14 @@
 </head>
 <body>
 
-<div id="offline-overlay" class="hidden">
+<div id="offline-overlay" class="hidden" role="dialog" aria-modal="true" aria-labelledby="offline-title">
   <div class="ap-icon-wrap">
     <div class="ap-bars">
       <div class="ap-bar"></div><div class="ap-bar"></div>
       <div class="ap-bar"></div><div class="ap-bar"></div>
     </div>
   </div>
-  <h2>Node unreachable</h2>
+  <h2 id="offline-title">Node unreachable</h2>
   <p class="overlay-sub">Connect your device to the node's WiFi network to use MeshChat.</p>
   <div class="overlay-steps">
     <div class="overlay-step">
@@ -463,7 +477,7 @@
         </div>
         <div id="msg-row">
           <textarea id="msg-input" placeholder="message…" rows="1" oninput="onComposeInput(this)" onkeydown="handleKey(event)"></textarea>
-          <button id="send-btn" onclick="sendMessage()" title="Send" disabled>
+          <button id="send-btn" onclick="sendMessage()" title="Send" aria-label="Send message" disabled>
             <svg viewBox="0 0 16 16" fill="none"><path d="M14 8L2 2l3 6-3 6 12-6z" fill="#0a0a0a"/></svg>
           </button>
         </div>
@@ -554,22 +568,22 @@
       <div class="settings-group">
         <div class="settings-row">
           <div><div class="settings-label">Desktop/phone notifications</div><div class="settings-desc" id="notif-desc">prompt to enable</div></div>
-          <div class="toggle" id="toggle-notifications" onclick="toggleNotifications(this)"></div>
+          <div class="toggle" id="toggle-notifications" role="switch" tabindex="0" aria-checked="false" aria-label="Desktop and phone notifications" onclick="toggleNotifications(this)" onkeydown="if(event.key===' '||event.key==='Enter'){event.preventDefault();toggleNotifications(this);}"></div>
         </div>
         <div class="settings-row">
           <div><div class="settings-label">Vibrate on inbound</div><div class="settings-desc">haptic on new message</div></div>
-          <div class="toggle" id="toggle-vibrate" onclick="toggleSetting(this, 'meshchat_vibrate')"></div>
+          <div class="toggle" id="toggle-vibrate" role="switch" tabindex="0" aria-checked="false" aria-label="Vibrate on inbound message" onclick="toggleSetting(this, 'meshchat_vibrate')" onkeydown="if(event.key===' '||event.key==='Enter'){event.preventDefault();toggleSetting(this, 'meshchat_vibrate');}"></div>
         </div>
         <div class="settings-row">
           <div><div class="settings-label">Sound</div><div class="settings-desc">audio on new message</div></div>
-          <div class="toggle" id="toggle-sound" onclick="toggleSetting(this, 'meshchat_sound')"></div>
+          <div class="toggle" id="toggle-sound" role="switch" tabindex="0" aria-checked="false" aria-label="Sound on inbound message" onclick="toggleSetting(this, 'meshchat_sound')" onkeydown="if(event.key===' '||event.key==='Enter'){event.preventDefault();toggleSetting(this, 'meshchat_sound');}"></div>
         </div>
       </div>
     </div>
 
   </div>
 </div>
-<div id="toast"></div>
+<div id="toast" role="alert" aria-live="assertive" aria-atomic="true"></div>
 
 <!-- Action sheet (cxa.14) — long-press / right-click reveal -->
 <div id="sheet-backdrop" class="hidden" onclick="hideActionSheet()"></div>
@@ -772,6 +786,12 @@ function showOfflineOverlay() {
   const addrEl = document.getElementById('overlay-server-addr');
   if (addrEl) addrEl.textContent = localStorage.getItem('meshchat_server_addr') || window.location.host;
   document.getElementById('offline-overlay').classList.remove('hidden');
+  // Move focus into the modal so keyboard users land on the only
+  // actionable control (the retry button).
+  setTimeout(() => {
+    const rb = document.querySelector('#offline-overlay .retry-btn');
+    if (rb) rb.focus();
+  }, 50);
 }
 
 async function retryConnection() {
@@ -1266,7 +1286,7 @@ function renderNodes() {
       </div>
       <div class="contact-meta">
         <span class="seen-time">${esc(seenLabel)}</span>
-        <button class="remove-btn" onclick="event.stopPropagation();removePeer('${esc(hash)}')" title="Remove">✕</button>
+        <button class="remove-btn" onclick="event.stopPropagation();removePeer('${esc(hash)}')" title="Remove" aria-label="Remove ${esc(node.name || shortHash(hash))}">✕</button>
       </div>`;
     attachLongPress(d, () => copyText(hash, 'Address copied'));
     list.appendChild(d);
@@ -1641,7 +1661,9 @@ function doVibrate() {
 // Generic bi-state toggle backed by localStorage. Defaults in loadSettings.
 function toggleSetting(el, key) {
   el.classList.toggle('on');
-  localStorage.setItem(key, el.classList.contains('on') ? '1' : '0');
+  const on = el.classList.contains('on');
+  el.setAttribute('aria-checked', String(on));
+  localStorage.setItem(key, on ? '1' : '0');
 }
 
 function loadSettings() {
@@ -1649,7 +1671,9 @@ function loadSettings() {
     const stored = localStorage.getItem(key);
     const on = stored === null ? def : stored === '1';
     const el = document.getElementById(id);
-    if (el) el.classList.toggle('on', on);
+    if (!el) return;
+    el.classList.toggle('on', on);
+    el.setAttribute('aria-checked', String(on));
   };
   apply('toggle-vibrate', 'meshchat_vibrate', true);
   apply('toggle-sound',   'meshchat_sound',   false);
@@ -1697,6 +1721,7 @@ function updateNotifToggleUI() {
   if (!toggle || !desc) return;
   if (!notificationsSupported()) {
     toggle.classList.remove('on');
+    toggle.setAttribute('aria-checked', 'false');
     toggle.style.opacity = '0.4';
     toggle.style.pointerEvents = 'none';
     desc.textContent = 'not supported in this browser';
@@ -1704,12 +1729,14 @@ function updateNotifToggleUI() {
   }
   if (Notification.permission === 'denied') {
     toggle.classList.remove('on');
+    toggle.setAttribute('aria-checked', 'false');
     desc.textContent = 'blocked — enable in browser settings';
     return;
   }
   const enabled = Notification.permission === 'granted'
     && localStorage.getItem(NOTIFICATIONS_KEY) === '1';
   toggle.classList.toggle('on', enabled);
+  toggle.setAttribute('aria-checked', String(enabled));
   desc.textContent = enabled ? 'on — alerts when app is backgrounded' : 'prompt to enable';
 }
 
