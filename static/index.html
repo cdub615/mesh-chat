@@ -217,7 +217,7 @@
     #msg-input::placeholder { color: var(--text-muted); }
     #msg-input:focus { border-color: var(--border-hover); }
     #send-btn {
-      width: 40px; height: 40px; flex-shrink: 0; background: var(--accent); border: none;
+      width: 44px; height: 44px; flex-shrink: 0; background: var(--accent); border: none;
       border-radius: var(--radius-sm); cursor: pointer; display: flex; align-items: center; justify-content: center;
       box-sizing: border-box; align-self: flex-end;
       transition: background .15s, transform .1s, opacity .15s;
@@ -269,6 +269,24 @@
     .copy-btn { font-family: var(--font-mono); font-size: 10px; background: var(--bg-elevated); border: 1px solid var(--border); color: var(--text-secondary); padding: 4px 8px; border-radius: var(--radius-sm); cursor: pointer; transition: border-color .15s, color .15s; }
     .copy-btn:hover { border-color: var(--border-hover); color: var(--text-primary); }
     .copy-btn.copied { color: var(--accent); border-color: rgba(34,197,94,0.3); }
+
+    /* cxa.11: 44×44 minimum tap targets per iOS HIG. Where the visual
+       design needs to stay compact, a transparent ::before pseudo extends
+       the hit area without enlarging the visible box. */
+    .copy-btn, .remove-btn {
+      min-height: 44px; min-width: 44px;
+      display: inline-flex; align-items: center; justify-content: center;
+    }
+    #announce-btn { min-height: 44px; }
+    .nav-tab { min-height: 44px; }
+    .dest-badge, .toggle, #status-pill, .msg-retry {
+      position: relative;
+    }
+    .dest-badge::before, .toggle::before, #status-pill::before, .msg-retry::before {
+      content: ''; position: absolute; inset: -11px;
+      /* Hit-area expander; pointer-events inherits so taps on the pad
+         dispatch to the parent element. */
+    }
 
     /* action sheet (cxa.14) */
     #sheet-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 9997; }
