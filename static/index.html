@@ -52,6 +52,21 @@
     }
 
     html, body { height: 100%; overflow: hidden; background: var(--bg-base); color: var(--text-primary); font-family: var(--font-ui); }
+
+    /* b3q.50 iOS niceties: kill tap-flash globally; suppress the native long-press
+       callout on elements that have our own long-press-to-copy handler so the two
+       don't race. Inputs keep default behaviour so iOS selection/paste still works. */
+    html { -webkit-tap-highlight-color: transparent; }
+    .msg, .contact-item, #node-addr, .conv-hash {
+      -webkit-touch-callout: none;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    input, textarea {
+      -webkit-touch-callout: default;
+      -webkit-user-select: text;
+      user-select: text;
+    }
     #app { display: flex; flex-direction: column; height: var(--app-height); max-width: 480px; margin: 0 auto; }
 
     /* topbar */
