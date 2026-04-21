@@ -270,6 +270,25 @@
     .copy-btn:hover { border-color: var(--border-hover); color: var(--text-primary); }
     .copy-btn.copied { color: var(--accent); border-color: rgba(34,197,94,0.3); }
 
+    /* action sheet (cxa.14) */
+    #sheet-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 9997; }
+    #sheet-backdrop.hidden, #action-sheet.hidden { display: none; }
+    #action-sheet {
+      position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+      z-index: 9998; background: var(--bg-surface); border: 1px solid var(--border);
+      border-radius: var(--radius-md); min-width: 240px; max-width: 90vw;
+      padding: 6px; box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+      display: flex; flex-direction: column; gap: 2px;
+    }
+    .sheet-btn {
+      background: none; border: none; color: var(--text-primary);
+      font-family: var(--font-ui); font-size: 14px; font-weight: 500;
+      padding: 14px 16px; text-align: left;
+      border-radius: var(--radius-sm); cursor: pointer; min-height: 44px;
+    }
+    .sheet-btn:hover, .sheet-btn:focus { background: var(--bg-elevated); outline: none; }
+    .sheet-cancel { color: var(--text-muted); margin-top: 4px; border-top: 1px solid var(--border); border-radius: 0 0 var(--radius-sm) var(--radius-sm); }
+
     /* toast */
     #toast {
       position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%) translateY(12px);
@@ -533,6 +552,10 @@
   </div>
 </div>
 <div id="toast"></div>
+
+<!-- Action sheet (cxa.14) — long-press / right-click reveal -->
+<div id="sheet-backdrop" class="hidden" onclick="hideActionSheet()"></div>
+<div id="action-sheet" class="hidden" role="menu"></div>
 
 <!-- QR scan overlay (cxa.2) — shown only when BarcodeDetector API is available -->
 <div id="qr-scan-overlay" class="hidden" style="
@@ -1037,6 +1060,7 @@ function paintMsg(m) {
       <span class="msg-time" title="${esc(isoTitle)}">${esc(m.time || '')}</span>
     </div>
     <div class="msg-body">${esc(m.body)}</div>${stat}`;
+  attachLongPress(div, () => showMsgActionSheet(div));
   list.insertBefore(div, anchor);
   return div;
 }
@@ -1226,6 +1250,7 @@ function renderNodes() {
         <span class="seen-time">${esc(seenLabel)}</span>
         <button class="remove-btn" onclick="event.stopPropagation();removePeer('${esc(hash)}')" title="Remove">✕</button>
       </div>`;
+    attachLongPress(d, () => copyText(hash, 'Address copied'));
     list.appendChild(d);
   }
 }
@@ -1500,6 +1525,86 @@ function cancelQRScan() {
   const overlay = document.getElementById('qr-scan-overlay');
   overlay.style.display = 'none';
   overlay.classList.add('hidden');
+}
+
+// ── Long-press + action sheet (cxa.14) ──────────────────────────────────────
+let longPressJustFired = false;
+function attachLongPress(el, onTrigger) {
+  let timer = null, sx = 0, sy = 0;
+  const cancel = () => { if (timer) { clearTimeout(timer); timer = null; } };
+  el.addEventListener('touchstart', e => {
+    if (!e.touches[0]) return;
+    sx = e.touches[0].clientX; sy = e.touches[0].clientY;
+    cancel();
+    timer = setTimeout(() => {
+      timer = null;
+      longPressJustFired = true;
+      if (navigator.vibrate) navigator.vibrate(20);
+      onTrigger();
+    }, 500);
+  }, { passive: true });
+  el.addEventListener('touchmove', e => {
+    const t = e.touches[0]; if (!t) return;
+    if (Math.abs(t.clientX - sx) > 10 || Math.abs(t.clientY - sy) > 10) cancel();
+  }, { passive: true });
+  el.addEventListener('touchend', cancel);
+  el.addEventListener('touchcancel', cancel);
+  el.addEventListener('contextmenu', e => { e.preventDefault(); onTrigger(); });
+}
+
+// Capture-phase click suppressor: long-press triggers a synthetic click on
+// touchend; swallow it so we don't also navigate into the conversation.
+document.addEventListener('click', e => {
+  if (longPressJustFired) {
+    e.stopPropagation();
+    e.preventDefault();
+    longPressJustFired = false;
+  }
+}, true);
+
+function showActionSheet(actions) {
+  const sheet = document.getElementById('action-sheet');
+  const bg = document.getElementById('sheet-backdrop');
+  sheet.innerHTML = '';
+  actions.forEach((a, i) => {
+    const b = document.createElement('button');
+    b.className = 'sheet-btn';
+    b.textContent = a.label;
+    b.onclick = () => { hideActionSheet(); a.fn(); };
+    sheet.appendChild(b);
+  });
+  const cancel = document.createElement('button');
+  cancel.className = 'sheet-btn sheet-cancel';
+  cancel.textContent = 'Cancel';
+  cancel.onclick = hideActionSheet;
+  sheet.appendChild(cancel);
+  sheet.classList.remove('hidden');
+  bg.classList.remove('hidden');
+}
+
+function hideActionSheet() {
+  document.getElementById('action-sheet').classList.add('hidden');
+  document.getElementById('sheet-backdrop').classList.add('hidden');
+}
+
+function copyText(text, successMsg) {
+  if (!navigator.clipboard) { toast('clipboard not supported'); return; }
+  navigator.clipboard.writeText(text).then(
+    () => toast(successMsg || 'copied'),
+    () => toast('copy failed'),
+  );
+}
+
+function showMsgActionSheet(msgEl) {
+  const body = msgEl.dataset.body || (msgEl.querySelector('.msg-body')?.textContent ?? '');
+  const isOut = msgEl.classList.contains('outbound');
+  const retryBtn = msgEl.querySelector('.msg-retry');
+  const actions = [];
+  if (isOut && retryBtn) {
+    actions.push({ label: '↻ Retry', fn: () => retryBtn.click() });
+  }
+  actions.push({ label: 'Copy message', fn: () => copyText(body, 'Message copied') });
+  showActionSheet(actions);
 }
 
 function toast(msg) {
