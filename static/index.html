@@ -517,18 +517,11 @@
         </div>
         <div class="settings-row">
           <div><div class="settings-label">Vibrate on inbound</div><div class="settings-desc">haptic on new message</div></div>
-          <div class="toggle on" id="toggle-vibrate" onclick="this.classList.toggle('on')"></div>
+          <div class="toggle" id="toggle-vibrate" onclick="toggleSetting(this, 'meshchat_vibrate')"></div>
         </div>
         <div class="settings-row">
           <div><div class="settings-label">Sound</div><div class="settings-desc">audio on new message</div></div>
-          <div class="toggle" id="toggle-sound" onclick="this.classList.toggle('on')"></div>
-        </div>
-      </div>
-      <div class="section-header">reticulum</div>
-      <div class="settings-group">
-        <div class="settings-row">
-          <div><div class="settings-label">Transport node</div><div class="settings-desc">forward packets for others</div></div>
-          <div class="toggle on" onclick="this.classList.toggle('on')"></div>
+          <div class="toggle" id="toggle-sound" onclick="toggleSetting(this, 'meshchat_sound')"></div>
         </div>
       </div>
     </div>
@@ -666,6 +659,7 @@ window.addEventListener('load', async () => {
   loadUnread();
   renderBadges();
   updateNotifToggleUI();
+  loadSettings();
   if ('BarcodeDetector' in window) {
     document.getElementById('scan-qr-btn').style.display = '';
   }
@@ -876,6 +870,7 @@ function connectWS() {
         }
         toast(`↓ ${shortHash(msg.from)}`);
         doVibrate();
+        playInboundDing();
         fireInboundNotification(msg);
         updateNode(msg.from, { last_seen_ts: Date.now() / 1000 });
       } else if (msg.type === 'status_update') {
@@ -1456,6 +1451,48 @@ function toast(msg) {
 function doVibrate() {
   if (document.getElementById('toggle-vibrate').classList.contains('on') && navigator.vibrate)
     navigator.vibrate([40, 20, 40]);
+}
+
+// ── Settings persistence (cxa.12) ────────────────────────────────────────────
+// Generic bi-state toggle backed by localStorage. Defaults in loadSettings.
+function toggleSetting(el, key) {
+  el.classList.toggle('on');
+  localStorage.setItem(key, el.classList.contains('on') ? '1' : '0');
+}
+
+function loadSettings() {
+  const apply = (id, key, def) => {
+    const stored = localStorage.getItem(key);
+    const on = stored === null ? def : stored === '1';
+    const el = document.getElementById(id);
+    if (el) el.classList.toggle('on', on);
+  };
+  apply('toggle-vibrate', 'meshchat_vibrate', true);
+  apply('toggle-sound',   'meshchat_sound',   false);
+}
+
+// Short 'ding' tone via Web Audio — no asset required. Lazily creates the
+// AudioContext on first use so we don't hit Safari's autoplay policies
+// until the user has opted into sound.
+let audioCtx = null;
+function playInboundDing() {
+  if (!document.getElementById('toggle-sound').classList.contains('on')) return;
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    const t = audioCtx.currentTime;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(880, t);
+    osc.frequency.exponentialRampToValueAtTime(660, t + 0.18);
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.exponentialRampToValueAtTime(0.15, t + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.22);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(t);
+    osc.stop(t + 0.24);
+  } catch {}
 }
 
 // ── Notifications (cxa.5) ────────────────────────────────────────────────────
