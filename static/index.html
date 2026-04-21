@@ -36,10 +36,15 @@
       --font-ui:       system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
       --font-mono:     ui-monospace, 'SF Mono', SFMono-Regular, 'Cascadia Code', 'Liberation Mono', Menlo, monospace;
       --safe-bottom:   env(safe-area-inset-bottom, 0px);
+      /* cxa.8: tracked from window.visualViewport to keep the compose bar
+         above the iOS keyboard. --app-height defaults to 100dvh; JS
+         overrides with visualViewport.height on browsers that support it. */
+      --kb-offset:     0px;
+      --app-height:    100dvh;
     }
 
     html, body { height: 100%; overflow: hidden; background: var(--bg-base); color: var(--text-primary); font-family: var(--font-ui); }
-    #app { display: flex; flex-direction: column; height: 100dvh; max-width: 480px; margin: 0 auto; }
+    #app { display: flex; flex-direction: column; height: var(--app-height); max-width: 480px; margin: 0 auto; }
 
     /* topbar */
     #topbar {
@@ -664,6 +669,7 @@ window.addEventListener('load', async () => {
   if ('BarcodeDetector' in window) {
     document.getElementById('scan-qr-btn').style.display = '';
   }
+  installVisualViewportTracking();
   showSkeletons();
   await loadIdentity();
   await loadMessages();
@@ -1257,6 +1263,39 @@ function setStatus(cls, text) {
 function autoResize(el) { el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 120) + 'px'; }
 function handleKey(e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } }
 function scrollBottom() { document.getElementById('msg-anchor').scrollIntoView({ behavior: 'smooth' }); }
+
+// ── Visual viewport tracking (cxa.8) ─────────────────────────────────────────
+// Keeps the compose bar above the iOS keyboard by sizing #app to
+// visualViewport.height instead of 100dvh, which lies on older iOS versions
+// and some installed-PWA contexts. No-op on browsers without visualViewport
+// (which behave correctly with dvh already).
+function installVisualViewportTracking() {
+  if (!window.visualViewport) return;
+  const root = document.documentElement;
+  const sync = () => {
+    const vh = window.visualViewport.height;
+    const offsetTop = window.visualViewport.offsetTop || 0;
+    root.style.setProperty('--app-height', vh + 'px');
+    root.style.setProperty('--kb-offset',
+      Math.max(0, window.innerHeight - vh) + 'px');
+    // When the keyboard pushes the page up, scrolling the window syncs
+    // the layout viewport so the compose bar stays glued to the bottom
+    // of the visible area on iOS Safari.
+    if (offsetTop) window.scrollTo(0, 0);
+  };
+  window.visualViewport.addEventListener('resize', sync);
+  window.visualViewport.addEventListener('scroll', sync);
+  sync();
+
+  // Re-scroll the conversation after the keyboard finishes animating so
+  // the last message stays visible above the compose bar.
+  const msgInput = document.getElementById('msg-input');
+  if (msgInput) {
+    msgInput.addEventListener('focus', () => {
+      setTimeout(() => { try { scrollBottom(); } catch {} }, 300);
+    });
+  }
+}
 
 async function saveDisplayName(name) {
   name = name.trim();
