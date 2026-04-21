@@ -1,11 +1,12 @@
 // MeshChat Service Worker
 // Caches UI shell for offline use. Messages only sync when on Pi's WiFi AP.
 
-const CACHE_NAME = 'meshchat-v4';
+const CACHE_NAME = 'meshchat-v5';
 const SHELL_ASSETS = [
   '/',
   '/index.html',
   '/manifest.json',
+  '/qrcode.js',
 ];
 
 self.addEventListener('install', (e) => {

@@ -415,6 +415,8 @@
         <div id="dest-row">
           <span id="dest-label">TO</span>
           <input id="dest-input" type="text" placeholder="destination hash" autocomplete="off" spellcheck="false" />
+          <span class="dest-badge" onclick="pasteDest()" title="Paste destination from clipboard">paste</span>
+          <span class="dest-badge" id="scan-qr-btn" onclick="scanDestQR()" title="Scan QR code" style="display:none">scan</span>
           <span class="dest-badge" onclick="switchTab('contacts', document.querySelector('[data-tab=contacts]'))">nodes ↗</span>
         </div>
         <div id="msg-row">
@@ -459,6 +461,16 @@
             <div class="settings-desc" id="full-addr">—</div>
           </div>
           <button class="copy-btn" id="copy-btn" onclick="copyAddr()">copy</button>
+        </div>
+        <div class="settings-row">
+          <div>
+            <div class="settings-label">Share as QR</div>
+            <div class="settings-desc">other phones can scan this to message you</div>
+          </div>
+          <button class="copy-btn" id="qr-toggle-btn" onclick="toggleSelfQR()">show</button>
+        </div>
+        <div id="self-qr-container" style="display:none;padding:16px;background:var(--bg-elevated);border-top:1px solid var(--border);">
+          <div id="self-qr" style="display:flex;justify-content:center;"></div>
         </div>
         <div class="settings-row">
           <div><div class="settings-label">Display name</div><div class="settings-desc">shown to other nodes</div></div>
@@ -520,6 +532,17 @@
 </div>
 <div id="toast"></div>
 
+<!-- QR scan overlay (cxa.2) — shown only when BarcodeDetector API is available -->
+<div id="qr-scan-overlay" class="hidden" style="
+  position:fixed;inset:0;background:rgba(0,0,0,0.92);z-index:9999;
+  display:none;flex-direction:column;align-items:center;justify-content:center;padding:24px;
+">
+  <video id="qr-scan-video" playsinline muted autoplay style="max-width:90vw;max-height:60vh;border-radius:var(--radius);background:#000;"></video>
+  <div style="margin-top:16px;color:#e5e7eb;font-family:var(--font-mono);font-size:13px;">point camera at QR code</div>
+  <button onclick="cancelQRScan()" style="margin-top:20px;padding:10px 24px;background:var(--bg-elevated);color:var(--text-primary);border:1px solid var(--border);border-radius:var(--radius-sm);cursor:pointer;font-family:var(--font-mono);font-size:13px;">cancel</button>
+</div>
+
+<script src="/qrcode.js"></script>
 <script>
 // ── Config ──────────────────────────────────────────────────────────────────
 const API  = window.location.origin;
@@ -638,6 +661,9 @@ window.addEventListener('load', async () => {
   loadUnread();
   renderBadges();
   updateNotifToggleUI();
+  if ('BarcodeDetector' in window) {
+    document.getElementById('scan-qr-btn').style.display = '';
+  }
   showSkeletons();
   await loadIdentity();
   await loadMessages();
@@ -1278,6 +1304,107 @@ function copyAddr() {
     b.textContent = 'copied!'; b.classList.add('copied');
     setTimeout(() => { b.textContent = 'copy'; b.classList.remove('copied'); }, 1800);
   });
+}
+
+// ── Destination entry helpers (cxa.2) ────────────────────────────────────────
+// LXMF destination hashes are 16 bytes → 32 hex chars. Accept any substring
+// that matches so a pasted "<0xABCD…>" or "lxmf:ABCD…" form still works.
+const HASH_RE_G = /[0-9a-f]{32}/i;
+
+async function pasteDest() {
+  if (!navigator.clipboard || !navigator.clipboard.readText) {
+    toast('clipboard not available'); return;
+  }
+  try {
+    const raw = (await navigator.clipboard.readText()).trim();
+    const m = raw.match(HASH_RE_G);
+    if (!m) { toast('clipboard has no valid hash'); return; }
+    selectDest(m[0].toLowerCase());
+    toast('destination set');
+  } catch {
+    toast('clipboard blocked — check browser permissions');
+  }
+}
+
+// Self-QR in Settings: rendered lazily on first reveal, re-rendered if myHash
+// changes between now and then.
+let selfQrFor = null;
+function renderSelfQR() {
+  if (!myHash || typeof qrcode === 'undefined') return;
+  if (selfQrFor === myHash) return;
+  try {
+    const qr = qrcode(0, 'M');
+    qr.addData(myHash);
+    qr.make();
+    document.getElementById('self-qr').innerHTML =
+      qr.createSvgTag({ cellSize: 5, margin: 2, scalable: true });
+    selfQrFor = myHash;
+  } catch {}
+}
+
+function toggleSelfQR() {
+  const wrap = document.getElementById('self-qr-container');
+  const btn = document.getElementById('qr-toggle-btn');
+  if (!myHash) { toast('identity not ready'); return; }
+  if (wrap.style.display === 'none') {
+    renderSelfQR();
+    wrap.style.display = 'block';
+    btn.textContent = 'hide';
+  } else {
+    wrap.style.display = 'none';
+    btn.textContent = 'show';
+  }
+}
+
+// QR scan: requires BarcodeDetector (Chrome/Edge/Opera; not Safari as of 2026).
+// The scan button is hidden when the API is missing; this function is a safety net.
+let qrScanStream = null;
+let qrScanRAF = null;
+async function scanDestQR() {
+  if (!('BarcodeDetector' in window)) { toast('scan not supported'); return; }
+  const overlay = document.getElementById('qr-scan-overlay');
+  const video = document.getElementById('qr-scan-video');
+  try {
+    qrScanStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment' }, audio: false,
+    });
+    video.srcObject = qrScanStream;
+    await video.play();
+    overlay.style.display = 'flex';
+    overlay.classList.remove('hidden');
+    const detector = new BarcodeDetector({ formats: ['qr_code'] });
+    const tick = async () => {
+      if (!qrScanStream) return;
+      try {
+        const codes = await detector.detect(video);
+        for (const c of codes) {
+          const m = (c.rawValue || '').match(HASH_RE_G);
+          if (m) {
+            const hash = m[0].toLowerCase();
+            cancelQRScan();
+            selectDest(hash);
+            toast('destination scanned');
+            return;
+          }
+        }
+      } catch {}
+      qrScanRAF = requestAnimationFrame(tick);
+    };
+    tick();
+  } catch {
+    cancelQRScan();
+    toast('camera unavailable');
+  }
+}
+
+function cancelQRScan() {
+  if (qrScanStream) { qrScanStream.getTracks().forEach(t => t.stop()); qrScanStream = null; }
+  if (qrScanRAF) { cancelAnimationFrame(qrScanRAF); qrScanRAF = null; }
+  const video = document.getElementById('qr-scan-video');
+  if (video) video.srcObject = null;
+  const overlay = document.getElementById('qr-scan-overlay');
+  overlay.style.display = 'none';
+  overlay.classList.add('hidden');
 }
 
 function toast(msg) {
