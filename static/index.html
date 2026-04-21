@@ -1030,10 +1030,11 @@ function paintMsg(m) {
   }
   const from = out ? 'you' : shortHash(m.from_hash);
   const stat = out ? `<div class="msg-status">${statusHTML(m.status)}</div>` : '';
+  const isoTitle = m.ts ? new Date(m.ts * 1000).toLocaleString() : '';
   div.innerHTML = `
     <div class="msg-header">
       <span class="msg-from">${esc(from)}</span>
-      <span class="msg-time">${esc(m.time || '')}</span>
+      <span class="msg-time" title="${esc(isoTitle)}">${esc(m.time || '')}</span>
     </div>
     <div class="msg-body">${esc(m.body)}</div>${stat}`;
   list.insertBefore(div, anchor);
@@ -1048,9 +1049,22 @@ function maybeInsertDateSep(ts) {
   const anchor = document.getElementById('msg-anchor');
   const sep    = document.createElement('div');
   sep.className = 'date-sep';
+  sep.dataset.ts = String(ts);
   sep.textContent = label;
   list.insertBefore(sep, anchor);
 }
+
+// cxa.10: rewrite every date separator's label periodically so a session
+// that crosses midnight re-renders 'Today' → 'Yesterday' etc.
+function refreshDateLabels() {
+  document.querySelectorAll('.date-sep[data-ts]').forEach(el => {
+    const ts = Number(el.dataset.ts);
+    if (!ts) return;
+    const fresh = dateSepLabel(ts);
+    if (fresh !== el.textContent) el.textContent = fresh;
+  });
+}
+setInterval(refreshDateLabels, 60_000);
 
 function paintSystemMsg(text) {
   const list   = document.getElementById('msg-list');
@@ -1622,10 +1636,17 @@ function fireInboundNotification(msg) {
 function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 function pad(n) { return String(n).padStart(2,'0'); }
 function shortHash(h) { if (!h) return '?'; return h.length > 12 ? h.slice(0,4)+'…'+h.slice(-4) : h; }
+// cxa.10: relative day labels (Today/Yesterday/Mon DD) that refresh on a
+// 60s tick so sessions spanning midnight re-label correctly.
 function dateSepLabel(ts) {
   const d = new Date(ts * 1000), now = new Date();
-  if (d.toDateString() === now.toDateString()) return 'today · ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
-  return d.toLocaleDateString('en-GB', { day:'numeric', month:'short' });
+  const sameDay = (a, b) => a.getFullYear() === b.getFullYear()
+    && a.getMonth() === b.getMonth()
+    && a.getDate() === b.getDate();
+  if (sameDay(d, now)) return 'Today';
+  const y = new Date(now); y.setDate(y.getDate() - 1);
+  if (sameDay(d, y)) return 'Yesterday';
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 </script>
 </body>
