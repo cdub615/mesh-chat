@@ -1,4 +1,5 @@
 .beads.bak/
+.worktrees/
 
 .claude/commands/deploy-node1.md
 .claude/commands/deploy-node2.md
